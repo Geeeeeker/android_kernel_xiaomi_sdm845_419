@@ -21,7 +21,6 @@ subdir-y += marvell
 subdir-y += mediatek
 subdir-y += nvidia
 #subdir-y += qcom
-subdir-y += qcom-sdm845
 subdir-y += realtek
 subdir-y += renesas
 subdir-y += rockchip
@@ -35,7 +34,14 @@ subdir-y += zte
 
 
 else
+    ifeq ($(CONFIG_ARCH_SDM845),y)
+        subdir-y += qcom-sdm845
+    ifeq ($(CONFIG_ARCH_SDM845),y)
+        subdir-y += xiaomi
+    endif
+    else
         subdir-y += vendor
+    endif
 endif
 
 dtb-$(CONFIG_OF_ALL_DTBS) := $(patsubst $(dtstree)/%.dts,%.dtb, $(foreach d,$(subdir), $(wildcard $(dtstree)/$(d)/*.dts)))
