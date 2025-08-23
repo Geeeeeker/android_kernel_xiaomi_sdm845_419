@@ -7,6 +7,7 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/err.h>
+#include <drm/drm_notifier.h>
 
 #include <drm/drm_notifier.h>
 #include "msm_drv.h"
@@ -199,6 +200,7 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 {
 	struct dsi_display *dsi_display = display;
 	struct dsi_panel *panel;
+	struct drm_device *drm_dev;
 	u32 bl_scale, bl_scale_sv;
 	u64 bl_temp;
 	int rc = 0;
@@ -207,11 +209,12 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 		return -EINVAL;
 
 	panel = dsi_display->panel;
+	drm_dev = dsi_display->drm_dev;
 
-	mutex_lock(&panel->panel_lock);
 	if (!dsi_panel_initialized(panel)) {
-		rc = -EINVAL;
-		goto error;
+		pr_info("[%s] set backlight before panel initialized, caching value: %d\n",
+		dsi_display->name, bl_lvl);
+		return -EINVAL;
 	}
 
 	panel->bl_config.bl_level = bl_lvl;
@@ -221,7 +224,8 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 	bl_temp = bl_lvl * bl_scale / MAX_BL_SCALE_LEVEL;
 
 	bl_scale_sv = panel->bl_config.bl_scale_sv;
-	bl_temp = (u32)bl_temp * bl_scale_sv / MAX_SV_BL_SCALE_LEVEL;
+	/* xiaomi change */
+	// bl_temp = (u32)bl_temp * bl_scale_sv / MAX_SV_BL_SCALE_LEVEL;
 
 	DSI_DEBUG("bl_scale = %u, bl_scale_sv = %u, bl_lvl = %u\n",
 		bl_scale, bl_scale_sv, (u32)bl_temp);
@@ -233,9 +237,21 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 		goto error;
 	}
 
-	rc = dsi_panel_set_backlight(panel, (u32)bl_temp);
-	if (rc)
-		DSI_ERR("unable to set backlight\n");
+	if (drm_dev && drm_dev->doze_state == DRM_BLANK_LP1) {
+		rc = dsi_panel_set_doze_backlight(display, (u32)bl_temp);
+		if (rc)
+			DSI_ERR("unable to set doze backlight\n");
+		rc = dsi_panel_enable_doze_backlight(panel, (u32)bl_temp);
+		if (rc)
+			DSI_ERR("unable to enable doze backlight\n");
+	} else if (drm_dev && drm_dev->doze_state == DRM_BLANK_LP2) {
+		DSI_ERR("unable to set doze backlight in LP2 state:%u\n", (u32)bl_temp);
+	} else {
+		drm_dev->doze_brightness = DOZE_BRIGHTNESS_INVALID;
+		rc = dsi_panel_set_backlight(panel, (u32)bl_temp);
+		if (rc)
+			DSI_ERR("unable to set backlight\n");
+	}
 
 	rc = dsi_display_clk_ctrl(dsi_display->dsi_clk_handle,
 			DSI_CORE_CLK, DSI_CLK_OFF);
@@ -246,7 +262,6 @@ int dsi_display_set_backlight(struct drm_connector *connector,
 	}
 
 error:
-	mutex_unlock(&panel->panel_lock);
 	return rc;
 }
 
@@ -678,6 +693,10 @@ static int dsi_display_read_status(struct dsi_display_ctrl *ctrl,
 		memcpy(config->return_buf + start,
 			config->status_buf, lenp[i]);
 		start += lenp[i];
+
+		if (cmds->post_wait_ms)
+			usleep_range(cmds->post_wait_ms*1000,
+				((cmds->post_wait_ms*1000)+10));
 	}
 
 	return rc;
@@ -874,6 +893,107 @@ release_panel_lock:
 	return rc;
 }
 
+int dsi_display_read_cmd(struct dsi_panel *panel, u32 packet_count,
+	u32 length, const char *data, const char *state, u32 rlen)
+{
+	struct dsi_read_config read_config;
+	struct dsi_panel_cmd_set *read_cmd;
+	struct dsi_cmd_desc *cmds;
+	struct mipi_dsi_host *host;
+	struct dsi_display *display;
+
+	int rc = 0;
+	u32 size;
+	int i, j;
+	u8 *payload;
+
+	if (packet_count > 1 || packet_count == 0) {
+		pr_info("temperary no support packet_count(%d) > 1 \n", packet_count);
+		return -EINVAL;
+	}
+
+	if (panel == NULL)
+		return -EINVAL;
+
+	host = panel->host;
+	if (host) {
+		display = to_dsi_display(host);
+		if (display == NULL)
+			return -EINVAL;
+	} else
+		return -EINVAL;
+
+	pr_debug("%s in\n", __func__);
+	read_cmd = &read_config.read_cmd;
+	read_config.cmds_rlen = rlen;
+
+	size = packet_count * sizeof(*read_cmd->cmds);
+	read_cmd->cmds = kzalloc(size, GFP_KERNEL);
+	if (!read_cmd->cmds) {
+		pr_info("no memory\n");
+		rc = -ENOMEM;
+		goto error;
+	} else {
+		read_cmd->count = packet_count;
+		read_cmd->ctrl_idx = 0;
+		cmds = read_cmd->cmds;
+		for (i = 0; i < read_cmd->count; i++) {
+			cmds[i].msg.type = data[0];
+			cmds[i].last_command = (data[1] == 1 ? true : false);
+			cmds[i].msg.channel = data[2];
+			cmds[i].msg.flags |= (data[3] == 1 ? MIPI_DSI_MSG_REQ_ACK : 0);
+			cmds[i].msg.ctrl = 0;
+			cmds[i].post_wait_ms = data[4];
+			cmds[i].msg.tx_len = ((data[5] << 8) | (data[6]));
+			size = cmds[i].msg.tx_len * sizeof(u8);
+			if (size > length - 7) {
+				pr_info("payload size is larger than length(%d)\n", length);
+				goto error_free_mem;
+			}
+			payload = kzalloc(size, GFP_KERNEL);
+			if (!payload) {
+				rc = -ENOMEM;
+				goto error_free_mem;
+			}
+
+			for (j = 0; j < cmds[i].msg.tx_len; j++)
+				payload[j] = data[7 + j];
+
+			cmds[i].msg.tx_buf = payload;
+			data += (7 + cmds[i].msg.tx_len);
+		}
+
+		if (!state || !strcmp(state, "dsi_lp_mode")) {
+			read_cmd->state = DSI_CMD_SET_STATE_LP;
+		} else if (!strcmp(state, "dsi_hs_mode")) {
+			read_cmd->state = DSI_CMD_SET_STATE_HS;
+		} else {
+			DSI_ERR("command state unrecognized-%s\n", state);
+			goto error_free_payloads;
+		}
+	}
+
+	read_config.enabled = true;
+
+	rc = dsi_display_read_panel(display->panel, &read_config);
+
+	if (rc < 0) {
+		DSI_ERR("[%s] read cmd failed on master,rc=%d\n",
+			   display->name, rc);
+		goto error_free_payloads;
+	}
+
+error_free_payloads:
+	for (i = i - 1; i >= 0; i--)
+		kfree(cmds[i].msg.tx_buf);
+error_free_mem:
+	kfree(read_cmd->cmds);
+	read_cmd->cmds = NULL;
+error:
+	pr_debug("%s out\n", __func__);
+	return rc;
+}
+
 int dsi_display_read_panel(struct dsi_panel *panel, struct dsi_read_config *read_config)
 {
 	struct mipi_dsi_host *host;
@@ -1055,7 +1175,6 @@ error:
 	pr_debug("%s out\n", __func__);
 	return rc;
 }
-
 static int dsi_display_cmd_prepare(const char *cmd_buf, u32 cmd_buf_len,
 		struct dsi_cmd_desc *cmd, u8 *payload, u32 payload_len)
 {
@@ -5382,7 +5501,8 @@ int dsi_display_cont_splash_config(void *dsi_display)
 				display->is_cont_splash_enabled);
 
 	/* Set up ctrl isr before enabling core clk */
-	dsi_display_ctrl_isr_configure(display, true);
+	if (strcmp(display->name, "dsi_sim_vid_display"))
+		dsi_display_ctrl_isr_configure(display, true);
 
 	/* Vote for Core clk and link clk. Votes on ctrl and phy
 	 * regulator are inplicit from  pre clk on callback
@@ -5922,6 +6042,7 @@ int dsi_display_dev_probe(struct platform_device *pdev)
 	display->pdev = pdev;
 	display->boot_disp = boot_disp;
 	display->is_prim_display = true;
+	display->is_first_boot = true;
 
 	dsi_display_parse_cmdline_topology(display, index);
 
@@ -6404,7 +6525,7 @@ static struct mipi_dsi_host_ops dsi_host_ext_ops = {
 struct drm_panel *dsi_display_get_drm_panel(struct dsi_display * display)
 {
 	if (!display || !display->panel) {
-		pr_err("invalid param(s)\n");
+		DSI_ERR("invalid param(s)\n");
 		return NULL;
 	}
 
@@ -6529,6 +6650,7 @@ error:
 	return rc;
 }
 
+extern struct drm_notify_data g_notify_data;
 int dsi_display_get_info(struct drm_connector *connector,
 		struct msm_display_info *info, void *disp)
 {
@@ -7314,6 +7436,8 @@ int dsi_display_set_tpg_state(struct dsi_display *display, bool enable)
 			       display->name, i);
 			goto error;
 		}
+
+		display->panel->dsi_panel_off_mode = false;
 	}
 
 	display->is_tpg_enabled = enable;
@@ -7661,6 +7785,8 @@ int dsi_display_prepare(struct dsi_display *display)
 		DSI_ERR("no valid mode set for the display\n");
 		return -EINVAL;
 	}
+
+	cancel_delayed_work_sync(&display->panel->cmds_work);
 
 	SDE_EVT32(SDE_EVTLOG_FUNC_ENTRY);
 	mutex_lock(&display->display_lock);
@@ -8057,7 +8183,7 @@ int dsi_display_pre_commit(void *display,
 	int rc = 0;
 
 	if (!display || !params) {
-		pr_err("Invalid params\n");
+		DSI_ERR("Invalid params\n");
 		return -EINVAL;
 	}
 
@@ -8065,7 +8191,7 @@ int dsi_display_pre_commit(void *display,
 		enable = (params->qsync_mode > 0) ? true : false;
 		rc = dsi_display_qsync(display, enable);
 		if (rc)
-			pr_err("%s failed to send qsync commands\n",
+			DSI_ERR("%s failed to send qsync commands\n",
 				__func__);
 		SDE_EVT32(params->qsync_mode, rc);
 	}
