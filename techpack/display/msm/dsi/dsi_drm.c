@@ -407,9 +407,9 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 	struct drm_device *dev = bridge->dev;
 	int event = 0;
 
-	if (dev->doze_state == DRM_BLANK_POWERDOWN) {
-		dev->doze_state = DRM_BLANK_UNBLANK;
-		pr_info("%s power on from power off\n", __func__);
+	if (dev->doze_state == DRM_BLANK_UNBLANK) {
+		dev->doze_state = DRM_BLANK_POWERDOWN;
+		pr_info("%s wrong doze state\n", __func__);
 	}
 
 	event = dev->doze_state;
@@ -417,6 +417,11 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 
 	if (!bridge) {
 		DSI_ERR("Invalid params\n");
+		return;
+	}
+
+	if (c_bridge->display->is_prim_display && !atomic_read(&prim_panel_is_on)) {
+		DSI_ERR("%s Already power off\n", __func__);
 		return;
 	}
 

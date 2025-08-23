@@ -874,6 +874,188 @@ release_panel_lock:
 	return rc;
 }
 
+int dsi_display_read_panel(struct dsi_panel *panel, struct dsi_read_config *read_config)
+{
+	struct mipi_dsi_host *host;
+	struct dsi_display *display;
+	struct dsi_display_ctrl *ctrl;
+	struct dsi_cmd_desc *cmds;
+	int i, rc = 0, count = 0;
+	u32 flags = 0;
+
+	if (panel == NULL || read_config == NULL)
+		return -EINVAL;
+
+	host = panel->host;
+	if (host) {
+		display = to_dsi_display(host);
+		if (display == NULL)
+			return -EINVAL;
+	} else
+		return -EINVAL;
+
+	if (!panel->panel_initialized) {
+		pr_debug("Panel not initialized\n");
+		return -EINVAL;
+	}
+
+	if (!read_config->enabled) {
+		pr_info("read operation was not permitted\n");
+		return -EPERM;
+	}
+
+	dsi_display_clk_ctrl(display->dsi_clk_handle,
+		DSI_ALL_CLKS, DSI_CLK_ON);
+
+	ctrl = &display->ctrl[display->cmd_master_idx];
+
+	rc = dsi_display_cmd_engine_enable(display);
+	if (rc) {
+		DSI_ERR("cmd engine enable failed\n");
+		rc = -EPERM;
+		goto exit_ctrl;
+	}
+
+	if (display->tx_cmd_buf == NULL) {
+		rc = dsi_host_alloc_cmd_tx_buffer(display);
+		if (rc) {
+			DSI_ERR("failed to allocate cmd tx buffer memory\n");
+			goto exit;
+		}
+	}
+
+	count = read_config->read_cmd.count;
+	cmds = read_config->read_cmd.cmds;
+	if (cmds->last_command) {
+		cmds->msg.flags |= MIPI_DSI_MSG_LASTCOMMAND;
+		flags |= DSI_CTRL_CMD_LAST_COMMAND;
+	}
+	flags |= (DSI_CTRL_CMD_FETCH_MEMORY | DSI_CTRL_CMD_READ);
+
+	memset(read_config->rbuf, 0x0, sizeof(read_config->rbuf));
+	cmds->msg.rx_buf = read_config->rbuf;
+	cmds->msg.rx_len = read_config->cmds_rlen;
+
+	rc = dsi_ctrl_cmd_transfer(ctrl->ctrl, &(cmds->msg), &flags);
+	if (rc <= 0) {
+		DSI_ERR("rx cmd transfer failed rc=%d\n", rc);
+		goto exit;
+	}
+
+	for (i = 0; i < read_config->cmds_rlen; i++) //debug
+		pr_info("0x%x ", read_config->rbuf[i]);
+	pr_info("\n");
+
+exit:
+	dsi_display_cmd_engine_disable(display);
+exit_ctrl:
+	dsi_display_clk_ctrl(display->dsi_clk_handle,
+		DSI_ALL_CLKS, DSI_CLK_OFF);
+
+	return rc;
+}
+
+int dsi_display_read_cmd(struct dsi_panel *panel, u32 packet_count,
+	u32 length, const char *data, const char *state, u32 rlen)
+{
+	struct dsi_read_config read_config;
+	struct dsi_panel_cmd_set *read_cmd;
+	struct dsi_cmd_desc *cmds;
+	struct mipi_dsi_host *host;
+	struct dsi_display *display;
+
+	int rc = 0;
+	u32 size;
+	int i, j;
+	u8 *payload;
+
+	if (packet_count > 1 || packet_count == 0) {
+		pr_info("temperary no support packet_count(%d) > 1 \n", packet_count);
+		return -EINVAL;
+	}
+
+	if (panel == NULL)
+		return -EINVAL;
+
+	host = panel->host;
+	if (host) {
+		display = to_dsi_display(host);
+		if (display == NULL)
+			return -EINVAL;
+	} else
+		return -EINVAL;
+
+	pr_debug("%s in\n", __func__);
+	read_cmd = &read_config.read_cmd;
+	read_config.cmds_rlen = rlen;
+
+	size = packet_count * sizeof(*read_cmd->cmds);
+	read_cmd->cmds = kzalloc(size, GFP_KERNEL);
+	if (!read_cmd->cmds) {
+		pr_info("no memory\n");
+		rc = -ENOMEM;
+		goto error;
+	} else {
+		read_cmd->count = packet_count;
+		read_cmd->ctrl_idx = 0;
+		cmds = read_cmd->cmds;
+		for (i = 0; i < read_cmd->count; i++) {
+			cmds[i].msg.type = data[0];
+			cmds[i].last_command = (data[1] == 1 ? true : false);
+			cmds[i].msg.channel = data[2];
+			cmds[i].msg.flags |= (data[3] == 1 ? MIPI_DSI_MSG_REQ_ACK : 0);
+			cmds[i].msg.ctrl = 0;
+			cmds[i].post_wait_ms = data[4];
+			cmds[i].msg.tx_len = ((data[5] << 8) | (data[6]));
+			size = cmds[i].msg.tx_len * sizeof(u8);
+			if (size > length - 7) {
+				pr_info("payload size is larger than length(%d)\n", length);
+				goto error_free_mem;
+			}
+			payload = kzalloc(size, GFP_KERNEL);
+			if (!payload) {
+				rc = -ENOMEM;
+				goto error_free_mem;
+			}
+
+			for (j = 0; j < cmds[i].msg.tx_len; j++)
+				payload[j] = data[7 + j];
+
+			cmds[i].msg.tx_buf = payload;
+			data += (7 + cmds[i].msg.tx_len);
+		}
+
+		if (!state || !strcmp(state, "dsi_lp_mode")) {
+			read_cmd->state = DSI_CMD_SET_STATE_LP;
+		} else if (!strcmp(state, "dsi_hs_mode")) {
+			read_cmd->state = DSI_CMD_SET_STATE_HS;
+		} else {
+			DSI_ERR("command state unrecognized-%s\n", state);
+			goto error_free_payloads;
+		}
+	}
+
+	read_config.enabled = true;
+
+	rc = dsi_display_read_panel(display->panel, &read_config);
+
+	if (rc < 0) {
+		DSI_ERR("[%s] read cmd failed on master,rc=%d\n",
+			   display->name, rc);
+		goto error_free_payloads;
+	}
+
+error_free_payloads:
+	for (i = i - 1; i >= 0; i--)
+		kfree(cmds[i].msg.tx_buf);
+error_free_mem:
+	kfree(read_cmd->cmds);
+	read_cmd->cmds = NULL;
+error:
+	pr_debug("%s out\n", __func__);
+	return rc;
+}
+
 static int dsi_display_cmd_prepare(const char *cmd_buf, u32 cmd_buf_len,
 		struct dsi_cmd_desc *cmd, u8 *payload, u32 payload_len)
 {
@@ -1198,16 +1380,26 @@ static void _dsi_display_setup_misr(struct dsi_display *display)
 int dsi_display_set_power(struct drm_connector *connector,
 		int power_mode, void *disp)
 {
-	struct drm_notify_data g_notify_data;
 	struct dsi_display *display = disp;
+	struct drm_device *dev = NULL;
+	struct drm_notify_data g_notify_data;
 	int rc = 0;
+	int event = 0;
 
 	if (!display || !display->panel) {
 		DSI_ERR("invalid display/panel\n");
 		return -EINVAL;
 	}
 
-	g_notify_data.data = &power_mode;
+	if (!connector || !connector->dev) {
+		DSI_ERR("invalid connector/dev\n");
+		return -EINVAL;
+	} else {
+		dev = connector->dev;
+		event = dev->doze_state;
+	}
+
+	g_notify_data.data = &event;
 	switch (power_mode) {
 	case SDE_MODE_DPMS_LP1:
 		drm_notifier_call_chain(DRM_EARLY_EVENT_BLANK, &g_notify_data);
@@ -1224,6 +1416,9 @@ int dsi_display_set_power(struct drm_connector *connector,
 	case SDE_MODE_DPMS_ON:
 		if ((display->panel->power_mode == SDE_MODE_DPMS_LP1) ||
 			(display->panel->power_mode == SDE_MODE_DPMS_LP2)) {
+			if (dev->pre_state != SDE_MODE_DPMS_LP1 &&
+						dev->pre_state != SDE_MODE_DPMS_LP2)
+				break;
 			drm_notifier_call_chain(DRM_EARLY_EVENT_BLANK, &g_notify_data);
 			rc = dsi_panel_set_nolp(display->panel);
 			drm_notifier_call_chain(DRM_EVENT_BLANK, &g_notify_data);
@@ -1233,6 +1428,7 @@ int dsi_display_set_power(struct drm_connector *connector,
 	default:
 		return rc;
 	}
+	dev->pre_state = power_mode;
 
 	DSI_DEBUG("Power mode transition from %d to %d %s",
 			display->panel->power_mode, power_mode,
