@@ -36,6 +36,7 @@ static atomic_t prim_panel_is_on;
 static struct wakeup_source *prim_panel_wakelock;
 
 struct drm_notify_data g_notify_data;
+int panel_disp_param_send(struct dsi_display *display, int cmd);
 
 /*
  * drm_register_client - register a client notifier
