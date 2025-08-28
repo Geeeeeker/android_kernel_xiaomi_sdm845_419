@@ -2483,7 +2483,6 @@ static const struct drm_connector_helper_funcs sde_connector_helper_ops_v2 = {
 static irqreturn_t esd_err_irq_handle(int irq, void *data)
 {
 	struct sde_connector *c_conn = data;
-	struct drm_event event;
 	bool panel_on = true;
 
 	if (!c_conn && !c_conn->display) {
@@ -2498,16 +2497,10 @@ static irqreturn_t esd_err_irq_handle(int irq, void *data)
 		}
 	}
 
-	SDE_ERROR("esd check irq report PANEL_DEAD conn_id: %d enc_id: %d, panel_status[%d]\n",
-		c_conn->base.base.id, c_conn->encoder->base.id, panel_on);
-
 	if (panel_on) {
-		c_conn->panel_dead = true;
-		event.type = DRM_EVENT_PANEL_DEAD;
-		event.length = sizeof(bool);
-		msm_mode_object_event_notify(&c_conn->base.base,
-			c_conn->base.dev, &event, (u8 *)&c_conn->panel_dead);
-		sde_encoder_display_failure_notification(c_conn->encoder,false);
+		SDE_ERROR("esd check irq report PANEL_DEAD conn_id: %d enc_id: %d, panel_status[%d]\n",
+			c_conn->base.base.id, c_conn->encoder->base.id, panel_on);
+		_sde_connector_report_panel_dead(c_conn, false);
 	}
 	return IRQ_HANDLED;
 }
@@ -2880,6 +2873,7 @@ struct drm_connector *sde_connector_init(struct drm_device *dev,
 	struct sde_kms *sde_kms;
 	struct sde_connector *c_conn = NULL;
 	struct msm_display_info display_info;
+	struct dsi_display *dsi_display;
 	int rc;
 
 	if (!dev || !dev->dev_private || !encoder) {
@@ -3016,6 +3010,24 @@ struct drm_connector *sde_connector_init(struct drm_device *dev,
 
 	if (c_conn->connector_type == DRM_MODE_CONNECTOR_DSI)
 		primary_c_conn = c_conn;
+
+	if (connector_type == DRM_MODE_CONNECTOR_DSI) {
+			dsi_display = (struct dsi_display *)(display);
+		/* register esd irq and enable it after panel enabled */
+		if (dsi_display && dsi_display->panel &&
+			dsi_display->panel->esd_config.esd_err_irq_gpio > 0) {
+			rc = request_threaded_irq(dsi_display->panel->esd_config.esd_err_irq,
+					NULL, esd_err_irq_handle,
+					dsi_display->panel->esd_config.esd_err_irq_flags,
+					"esd_err_irq", c_conn);
+			if (rc < 0) {
+				pr_err("request irq %d failed\n", dsi_display->panel->esd_config.esd_err_irq);
+				dsi_display->panel->esd_config.esd_err_irq = 0;
+			} else {
+				pr_info("Request esd irq succeed!\n");
+			}
+		}
+	}
 
 	return &c_conn->base;
 

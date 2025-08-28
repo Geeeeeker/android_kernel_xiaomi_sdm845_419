@@ -18,6 +18,9 @@
 #include "dsi_ctrl_hw.h"
 #include "dsi_parser.h"
 
+#include "../../../../kernel/irq/internals.h"
+#include "dsi_display.h"
+
 #include <linux/fs.h>
 #include <asm/uaccess.h>
 #include <asm/fcntl.h>
@@ -3831,6 +3834,32 @@ error:
 	return rc;
 }
 
+static void dsi_panel_esd_irq_ctrl(struct dsi_panel *panel,
+				  bool enable)
+{
+	struct drm_panel_esd_config *esd_config;
+	struct irq_desc *desc;
+
+	if (!panel || !panel->panel_initialized) {
+		pr_err("[LCD] panel not ready!\n");
+		return;
+	}
+
+	esd_config = &panel->esd_config;
+	if (gpio_is_valid(esd_config->esd_err_irq_gpio)) {
+		if (esd_config->esd_err_irq) {
+			if (enable) {
+				desc = irq_to_desc(esd_config->esd_err_irq);
+				if (!irq_settings_is_level(desc))
+					desc->istate &= ~IRQS_PENDING;
+				enable_irq(esd_config->esd_err_irq);
+			} else {
+				disable_irq_nosync(esd_config->esd_err_irq);
+			}
+		}
+	}
+}
+
 static void dsi_panel_update_util(struct dsi_panel *panel,
 				  struct device_node *parser_node)
 {
@@ -5891,6 +5920,9 @@ int dsi_panel_enable(struct dsi_panel *panel)
 		       panel->name, rc);
 	else
 		panel->panel_initialized = true;
+
+	dsi_panel_esd_irq_ctrl(panel, true);
+
 	panel->fod_hbm_enabled = false;
 	panel->in_aod = false;
 	mutex_unlock(&panel->panel_lock);
@@ -5958,6 +5990,8 @@ int dsi_panel_disable(struct dsi_panel *panel)
 	}
 
 	mutex_lock(&panel->panel_lock);
+
+	dsi_panel_esd_irq_ctrl(panel, false);
 
 	/* Avoid sending panel off commands when ESD recovery is underway */
 	if (!atomic_read(&panel->esd_recovery_pending)) {
