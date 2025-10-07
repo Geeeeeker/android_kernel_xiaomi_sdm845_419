@@ -63,6 +63,10 @@
 #define ADC_TM_Mn_DATA1(n)			((n * 2) + 0xa1)
 #define ADC_TM_DATA_SHIFT			8
 
+#if defined(CONFIG_ARCH_SDM845)
+#define ADC_TM_NUM_CHANNELS 8
+#endif
+
 static struct adc_tm_trip_reg_type adc_tm_ch_data[] = {
 	[ADC_TM_CHAN0] = {ADC_TM_M0_ADC_CH_SEL_CTL},
 	[ADC_TM_CHAN1] = {ADC_TM_M1_ADC_CH_SEL_CTL},
@@ -1043,8 +1047,7 @@ static int adc_tm5_init(struct adc_tm_chip *chip, uint32_t dt_chans)
 	unsigned int offset_btm_idx = 0, i;
 
 	if ((chip->pmic_rev_id) &&
-		(chip->pmic_rev_id->pmic_subtype == PM660_SUBTYPE ||
-		chip->pmic_rev_id->pmic_subtype == PM8998_SUBTYPE)) {
+		(chip->pmic_rev_id->pmic_subtype == PM660_SUBTYPE)) {
 		dig_param_len = 2;
 		pmic_subtype_660 = true;
 	} else {
@@ -1055,7 +1058,11 @@ static int adc_tm5_init(struct adc_tm_chip *chip, uint32_t dt_chans)
 			return ret;
 		}
 
+#if !defined(CONFIG_ARCH_SDM845)
 		if (dt_chans > channels_available) {
+#else
+		if (dt_chans > ADC_TM_NUM_CHANNELS) {
+#endif
 			pr_err("More nodes than channels supported:%d\n",
 						channels_available);
 			return -EINVAL;
