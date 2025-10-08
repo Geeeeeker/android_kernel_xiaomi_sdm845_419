@@ -2178,7 +2178,7 @@ int smblib_get_prop_batt_status(struct smb_charger *chg,
 			val->intval = POWER_SUPPLY_STATUS_FULL;
 		break;
 	case DISABLE_CHARGE:
-		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+/*		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;*/
 		break;
 	default:
 		val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
@@ -2425,6 +2425,8 @@ int smblib_set_prop_dc_temp_level(struct smb_charger *chg,
 	union power_supply_propval batt_temp;
 	int rc;
 
+	return 0;
+
 	rc = smblib_get_prop_dc_present(chg, &dc_present);
 	if (rc < 0) {
 		pr_err("Couldn't get dc present rc=%d\n", rc);
@@ -2585,6 +2587,8 @@ static int smblib_therm_charging(struct smb_charger *chg)
 {
 	int thermal_icl_ua = 0;
 	int rc;
+
+	return 0;
 
 	if (chg->system_temp_level >= MAX_TEMP_LEVEL)
 		return 0;
