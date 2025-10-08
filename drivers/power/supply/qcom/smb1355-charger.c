@@ -741,13 +741,26 @@ static int smb1355_get_prop_online(struct smb1355 *chip,
 		val->intval = chip->charging_enabled;
 		goto done;
 	}
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
+	rc = smb1355_read(chip, POWER_PATH_STATUS_REG, &stat);
+#else
 	rc = smb1355_read(chip, BATTERY_STATUS_3_REG, &stat);
+#endif
 	if (rc < 0) {
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
+		pr_err("failed to read POWER_PATH_STATUS_REG %d\n", rc);
+#else
 		pr_err("failed to read BATTERY_STATUS_3_REG %d\n", rc);
+#endif
 	} else {
 		val->intval = (bool)(stat & ENABLE_CHARGING_BIT);
 		chip->charging_enabled = val->intval;
 	}
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
+    val->intval = (stat & USE_USBIN_BIT) &&
+                    (stat & VALID_INPUT_POWER_SOURCE_STS_BIT);
+#endif
+
 done:
 	mutex_unlock(&chip->suspend_lock);
 	return rc;
