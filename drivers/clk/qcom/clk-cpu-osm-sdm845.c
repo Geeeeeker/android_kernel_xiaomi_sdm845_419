@@ -683,12 +683,23 @@ static struct clk_osm *osm_configure_policy(struct cpufreq_policy *policy)
 }
 
 static void
-osm_set_index(struct clk_osm *c, unsigned int index, unsigned int num)
+osm_set_index(struct clk_osm *c, unsigned int index)
 {
-	clk_osm_write_reg(c, index, DCVS_PERF_STATE_DESIRED_REG(num, is_sdm845v1));
+	struct clk_hw *p_hw = clk_hw_get_parent(&c->hw);
+	struct clk_osm *parent = to_clk_osm(p_hw);
+	unsigned long rate = 0;
 
-	/* Make sure the write goes through before proceeding */
-	clk_osm_mb(c);
+	if (index >= OSM_TABLE_SIZE) {
+		pr_err("Passing an index (%u) that's greater than max (%d)\n",
+					index, OSM_TABLE_SIZE - 1);
+		return;
+	}
+
+	rate = parent->osm_table[index].frequency;
+	if (!rate)
+		return;
+
+	clk_set_rate(c->hw.clk, clk_round_rate(c->hw.clk, rate));
 }
 
 static int
@@ -696,26 +707,11 @@ osm_cpufreq_target_index(struct cpufreq_policy *policy, unsigned int index)
 {
 	struct clk_osm *c = policy->driver_data;
 
-	osm_set_index(c, index, c->core_num);
+	osm_set_index(c, index);
 	arch_set_freq_scale(policy->related_cpus,
 			    policy->freq_table[index].frequency,
 			    policy->cpuinfo.max_freq);
 	return 0;
-}
-
-static unsigned int
-osm_cpufreq_fast_switch(struct cpufreq_policy *policy, unsigned int target_freq)
-{
-	int index;
-
-	index = cpufreq_frequency_table_target(policy, target_freq,
-							CPUFREQ_RELATION_L);
-	if (index < 0)
-		return 0;
-
-	osm_cpufreq_target_index(policy, index);
-
-	return policy->freq_table[index].frequency;
 }
 
 static unsigned int osm_cpufreq_get(unsigned int cpu)
@@ -807,8 +803,6 @@ static int osm_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	policy->freq_table = table;
 	policy->driver_data = c;
 	policy->dvfs_possible_from_any_cpu = true;
-	policy->fast_switch_possible = true;
-
 	cpumask_copy(policy->cpus, &c->related_cpus);
 	return 0;
 }
@@ -834,7 +828,6 @@ static struct cpufreq_driver qcom_osm_cpufreq_driver = {
 	.get		= osm_cpufreq_get,
 	.init		= osm_cpufreq_cpu_init,
 	.exit		= osm_cpufreq_cpu_exit,
-	.fast_switch	= osm_cpufreq_fast_switch,
 	.name		= "osm-cpufreq",
 	.attr		= osm_cpufreq_attr,
 	.boost_enabled	= true,
