@@ -2525,9 +2525,10 @@ static int cam_icp_mgr_abort_handle(
 		rc = -ETIMEDOUT;
 		CAM_ERR(CAM_ICP, "FW timeout/err in abort handle command");
 		cam_hfi_queue_dump();
+	} else {
+		kfree(abort_cmd);
 	}
 
-	kfree(abort_cmd);
 	return rc;
 }
 
@@ -2582,8 +2583,10 @@ static int cam_icp_mgr_destroy_handle(
 			HFI_DEBUG_MODE_QUEUE)
 			cam_icp_mgr_process_dbg_buf();
 		cam_hfi_queue_dump();
+	} else {
+		kfree(destroy_cmd);
 	}
-	kfree(destroy_cmd);
+
 	return rc;
 }
 
