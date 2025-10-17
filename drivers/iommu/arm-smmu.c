@@ -2145,7 +2145,7 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 		if (!non_fatal_fault) {
 			dev_err(smmu->dev,
 				"Unhandled arm-smmu context fault!\n");
-			//BUG();
+			BUG();
 		}
 	}
 
