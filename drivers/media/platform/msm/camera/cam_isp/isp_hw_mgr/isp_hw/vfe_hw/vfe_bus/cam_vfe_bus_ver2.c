@@ -3004,14 +3004,12 @@ static int cam_vfe_bus_init_hw(void *hw_priv,
 		bus_priv,
 		cam_vfe_bus_error_irq_top_half,
 #if defined(CONFIG_MACH_XIAOMI_SDM845)
-			NULL,
-			NULL,
-			NULL);
+		NULL,
 #else
 		cam_vfe_bus_err_bottom_half,
+#endif
 		bus_priv->tasklet_info,
 		&tasklet_bh_api);
-#endif
 
 	if (bus_priv->irq_handle <= 0) {
 		CAM_ERR(CAM_ISP, "Failed to subscribe BUS IRQ");
