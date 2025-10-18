@@ -3113,8 +3113,10 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 	struct device_node *node, *temp;
 	const char *temp_string;
 	int rc, i = 0, j = 0;
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
 	struct flash_node_data *fnode;
 	struct flash_switch_data *snode;
+#endif
 
 	node = pdev->dev.of_node;
 	if (!node) {
@@ -3200,26 +3202,26 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 					i, rc);
 				goto error_led_register;
 			}
-			#if defined(CONFIG_MACH_XIAOMI_SDM845)
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
 			fnode = &led->fnode[i];
 			if (!strcmp("led:torch_0", fnode->cdev.name)){
 				g_torch_0 =fnode;
 			}else if (!strcmp("led:torch_1",  fnode->cdev.name)){
 				g_torch_1 =fnode;
 			}
-			#endif
+#endif
 			i++;
 		}
 
 		if (!strcmp("switch", temp_string)) {
 			rc = qpnp_flash_led_parse_and_register_switch(led,
 					&led->snode[j], temp);
-			#if defined(CONFIG_MACH_XIAOMI_SDM845)
+#if defined(CONFIG_MACH_XIAOMI_SDM845)
 			snode = &led->snode[j];
 			if (!strcmp("led:switch_0",  snode->cdev.name)){
 				g_switch_0 = snode;
 			}
-			#endif
+#endif
 			if (rc < 0) {
 				pr_err("Unable to parse and register switch node, rc=%d\n",
 					rc);
