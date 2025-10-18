@@ -376,7 +376,7 @@ struct smb_charger {
 	int			dc_temp_level;
 	int			thermal_levels;
 	int			dc_thermal_levels;
-#ifdef CONFIG_MACH_XIAOMI
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	int			*thermal_mitigation_dcp;
 	int			*thermal_mitigation_qc3;
 	int			*thermal_mitigation_qc2;
@@ -558,8 +558,10 @@ int smblib_set_prop_batt_status(struct smb_charger *chg,
 				const union power_supply_propval *val);
 int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 				const union power_supply_propval *val);
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 int smblib_set_prop_dc_temp_level(struct smb_charger *chg,
 				const union power_supply_propval *val);
+#endif
 int smblib_set_prop_input_current_limited(struct smb_charger *chg,
 				const union power_supply_propval *val);
 

@@ -360,7 +360,7 @@ static int smb2_parse_dt(struct smb2 *chip)
 	if (rc < 0)
 		chip->dt.wipower_max_uw = -EINVAL;
 
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	if (of_find_property(node, "qcom,thermal-mitigation-dcp", &byte_len)) {
 		chg->thermal_mitigation_dcp = devm_kzalloc(chg->dev, byte_len,
 			GFP_KERNEL);
@@ -1409,7 +1409,9 @@ static enum power_supply_property smb2_batt_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	POWER_SUPPLY_PROP_DC_THERMAL_LEVELS,
+#endif
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
@@ -1453,9 +1455,11 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
 		rc = smblib_get_prop_system_temp_level_max(chg, val);
 		break;
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	case POWER_SUPPLY_PROP_DC_THERMAL_LEVELS:
 		rc = smblib_get_prop_dc_temp_level(chg, val);
 		break;
+#endif
 	case POWER_SUPPLY_PROP_CHARGER_TEMP:
 		/* do not query RRADC if charger is not present */
 		rc = smblib_get_prop_usb_present(chg, &pval);
@@ -1581,9 +1585,11 @@ static int smb2_batt_set_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
 		rc = smblib_set_prop_system_temp_level(chg, val);
 		break;
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	case POWER_SUPPLY_PROP_DC_THERMAL_LEVELS:
 		rc = smblib_set_prop_dc_temp_level(chg, val);
 		break;
+#endif
 	case POWER_SUPPLY_PROP_CAPACITY:
 		rc = smblib_set_prop_batt_capacity(chg, val);
 		break;
@@ -1681,7 +1687,9 @@ static int smb2_batt_prop_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_STEP_CHARGING_ENABLED:
 	case POWER_SUPPLY_PROP_SW_JEITA_ENABLED:
 	case POWER_SUPPLY_PROP_DIE_HEALTH:
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	case POWER_SUPPLY_PROP_DC_THERMAL_LEVELS:
+#endif
 		return 1;
 	default:
 		break;

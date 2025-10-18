@@ -2430,6 +2430,7 @@ int smblib_set_prop_batt_status(struct smb_charger *chg,
 	return 0;
 }
 
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 int smblib_set_prop_dc_temp_level(struct smb_charger *chg,
 				const union power_supply_propval *val)
 {
@@ -2476,6 +2477,7 @@ int smblib_set_prop_dc_temp_level(struct smb_charger *chg,
 
 	return 0;
 }
+#endif
 
 #define CHARGING_PERIOD_S 500
 #define NOT_CHARGING_PERIOD_S 1800
@@ -2578,7 +2580,7 @@ static void smblib_reg_work(struct work_struct *work)
 		schedule_delayed_work(&chg->reg_work,
 			NOT_CHARGING_PERIOD_S * HZ);
 }
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 #define MAX_TEMP_LEVEL		16
 /* percent of ICL compared to base 5V for different PD voltage_min voltage */
 #define PD_6P5V_PERCENT		85
@@ -2661,6 +2663,7 @@ static int smblib_therm_charging(struct smb_charger *chg)
 
 	return rc;
 }
+#endif
 
 int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 				const union power_supply_propval *val)
@@ -2695,7 +2698,7 @@ int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 
 	vote(chg->chg_disable_votable, THERMAL_DAEMON_VOTER, false, 0);
 
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	smblib_therm_charging(chg);
 #else
 	if (chg->system_temp_level == 0)
@@ -2710,7 +2713,7 @@ int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 			   chg->system_temp_level, chg->typec_present, chg->usb_psy_desc.type);
 	return 0;
 }
-#endif
+
 int smblib_set_prop_charge_qnovo_enable(struct smb_charger *chg,
 				  const union power_supply_propval *val)
 {
@@ -4959,10 +4962,10 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 	const struct apsd_result *apsd_result;
 	union power_supply_propval pval = {0, };
 	int usb_present = 0, ret = 0;
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	union power_supply_propval val = {0, };
-	int rc = 0;
 #endif
+	int rc = 0;
 
 	if (!rising)
 		return;
@@ -5006,7 +5009,7 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 		break;
 	}
 
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 	val.intval = chg->system_temp_level;
 	rc = power_supply_set_property(chg->batt_psy, POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT, &val);
 	if (rc < 0) {
@@ -5742,7 +5745,7 @@ irqreturn_t smblib_handle_dc_plugin(int irq, void *data)
 		val.intval = 1;
 		power_supply_set_property(chg->dc_psy,
 				POWER_SUPPLY_PROP_ONLINE, &val);
-#ifdef CONFIG_THERMAL
+#if defined(CONFIG_THERMAL) && defined(CONFIG_MACH_XIAOMI)
 		val.intval = chg->dc_temp_level;
 		power_supply_set_property(chg->batt_psy, POWER_SUPPLY_PROP_DC_THERMAL_LEVELS, &val);
 #endif
