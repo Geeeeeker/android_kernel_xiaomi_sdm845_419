@@ -17,10 +17,10 @@
 };
 
 &pmi8998_haptics {
-    compatible = "qcom,qpnp-haptics";
+    compatible = "qcom,haptics";
     qcom,pmic-misc = <&pmi8998_misc>;
     qcom,misc-clk-trim-error-reg = <0xf3>;
-    qcom,actuator-type = <0>;
+    qcom,actuator-type = "lra";
     qcom,play-mode = "direct";
     qcom,ilim-ma = <800>;
     qcom,sc-dbc-cycles = <8>;
