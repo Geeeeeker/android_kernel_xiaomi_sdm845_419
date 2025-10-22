@@ -10,7 +10,6 @@
 #include <sound/control.h>
 #include "msm-pcm-routing-v2.h"
 #include <dsp/q6audio-v2.h>
-#include <dsp/q6common.h>
 #include <dsp/apr_audio-v2.h>
 #include <dsp/apr_elliptic.h>
 #include <elliptic/elliptic_mixer_controls.h>
@@ -38,144 +37,76 @@ struct driver_sensor_event {
 	};
 };
 
-
-
 static int afe_set_parameter(int port,
 		int param_id,
 		int module_id,
 		struct afe_ultrasound_set_params_t *prot_config,
 		uint32_t length)
 {
-	struct afe_port_cmd_set_param_v2 *set_param_v2 = NULL;
-	uint32_t set_param_v2_size = sizeof(struct afe_port_cmd_set_param_v2);
-	struct afe_port_cmd_set_param_v3 *set_param_v3 = NULL;
-	uint32_t set_param_v3_size = sizeof(struct afe_port_cmd_set_param_v3);
-	struct param_hdr_v3 param_hdr = {0};
-	u16 port_id = 0;
+	int ret = -EINVAL;
 	int index = 0;
-	u8 *packed_param_data = NULL;
-	int packed_data_size = sizeof(union param_hdrs) + length;
-	int ret = 0;
+	struct afe_ultrasound_config_command configV;
+	struct afe_ultrasound_config_command *config;
 
-	pr_info("[ELUS] %s(): start (port=%d, param_id=0x%x, module_id=0x%x, len=%u)\n",
-		__func__, port, param_id, module_id, length);
+	config = &configV;
 
-	port_id = q6audio_get_port_id(port);
-	ret = q6audio_validate_port(port_id);
-	if (ret < 0) {
-		pr_err("[ELUS] invalid port id=0x%x ret=%d\n", port_id, ret);
-		return -EINVAL;
+	if (prot_config == NULL)
+		goto fail_cmd;
+
+	pr_debug("[ELUS]: inside %s\n", __func__);
+	memset(config, 0, sizeof(struct afe_ultrasound_config_command));
+	if (!prot_config) {
+		pr_err("%s Invalid params\n", __func__);
+		goto fail_cmd;
+	}
+	if ((q6audio_validate_port(port) < 0)) {
+		pr_err("%s invalid port %d\n", __func__, port);
+		goto fail_cmd;
 	}
 	index = q6audio_get_port_index(port);
-
-	param_hdr.module_id = module_id;
-	param_hdr.instance_id = INSTANCE_ID_0;
-	param_hdr.param_id = param_id;
-	param_hdr.param_size = length;
-
-	packed_param_data = kzalloc(packed_data_size, GFP_KERNEL);
-	if (!packed_param_data) {
-		pr_err("[ELUS] failed kzalloc packed_param_data\n");
-		return -ENOMEM;
-	}
-
-	ret = q6common_pack_pp_params(packed_param_data, &param_hdr,
-				      (u8 *)prot_config, &packed_data_size);
-	if (ret) {
-		pr_err("[ELUS] q6common_pack_pp_params() failed: %d\n", ret);
-		goto fail_cmd;
-	}
-
-	if (q6common_is_instance_id_supported()) {
-		set_param_v3_size += packed_data_size;
-		set_param_v3 = kzalloc(set_param_v3_size, GFP_KERNEL);
-		if (!set_param_v3) {
-			ret = -ENOMEM;
-			pr_err("[ELUS] failed kzalloc set_param_v3\n");
-			goto fail_cmd;
-		}
-
-		set_param_v3->apr_hdr.hdr_field =
-			APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
-				      APR_HDR_LEN(APR_HDR_SIZE),
-				      APR_PKT_VER);
-		set_param_v3->apr_hdr.pkt_size =
-			sizeof(struct afe_port_cmd_set_param_v3) + packed_data_size;
-		set_param_v3->apr_hdr.token = index;
-		set_param_v3->apr_hdr.opcode = AFE_PORT_CMD_SET_PARAM_V3;
-		set_param_v3->port_id = port_id;
-		set_param_v3->payload_size = packed_data_size;
-		memcpy(&set_param_v3->param_data, packed_param_data, packed_data_size);
-
-		pr_info("[ELUS] sending V3 param cmd (port_id=0x%x, size=%u)\n",
-			port_id, packed_data_size);
-		atomic_set(elus_afe.ptr_state, 1);
-		ret = apr_send_pkt(*elus_afe.ptr_apr, (uint32_t *)set_param_v3);
-	} else {
-		set_param_v2_size += packed_data_size;
-		set_param_v2 = kzalloc(set_param_v2_size, GFP_KERNEL);
-		if (!set_param_v2) {
-			ret = -ENOMEM;
-			pr_err("[ELUS] failed kzalloc set_param_v2\n");
-			goto fail_cmd;
-		}
-
-		set_param_v2->apr_hdr.hdr_field =
-			APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
-				      APR_HDR_LEN(APR_HDR_SIZE),
-				      APR_PKT_VER);
-		set_param_v2->apr_hdr.pkt_size =
-			sizeof(struct afe_port_cmd_set_param_v2) + packed_data_size;
-		set_param_v2->apr_hdr.token = index;
-		set_param_v2->apr_hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
-		set_param_v2->port_id = port_id;
-		set_param_v2->payload_size = packed_data_size;
-		memcpy(&set_param_v2->param_data, packed_param_data, packed_data_size);
-
-		pr_info("[ELUS] sending V2 param cmd (port_id=0x%x, size=%u)\n",
-			port_id, packed_data_size);
-		atomic_set(elus_afe.ptr_state, 1);
-		ret = apr_send_pkt(*elus_afe.ptr_apr, (uint32_t *)set_param_v2);
-	}
-
+	config->pdata.module_id = module_id;
+	config->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+						  APR_HDR_LEN(APR_HDR_SIZE),
+						  APR_PKT_VER);
+	config->hdr.pkt_size = sizeof(struct afe_ultrasound_config_command);
+	config->hdr.src_port = 0;
+	config->hdr.dest_port = 0;
+	config->hdr.token = index;
+	config->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
+	config->param.port_id = q6audio_get_port_id(port);
+	config->param.payload_size =
+			sizeof(struct afe_ultrasound_config_command) -
+			sizeof(config->hdr) - sizeof(config->param);
+	config->pdata.param_id = param_id;
+	config->pdata.param_size = length;
+	pr_debug("[ELUS]: param_size %d\n", length);
+	memcpy(config->prot_config.payload, prot_config, length);
+	atomic_set(elus_afe.ptr_state, 1);
+	ret = apr_send_pkt(*elus_afe.ptr_apr, (uint32_t *) config);
 	if (ret < 0) {
-		pr_err("[ELUS] apr_send_pkt() failed ret=%d (port=%d param=0x%x)\n",
-		       ret, port, param_id);
+		pr_err("%s: Setting param for port %d param[0x%x]failed\n",
+			   __func__, port, param_id);
 		goto fail_cmd;
 	}
-
-	pr_info("[ELUS] waiting for response (index=%d, timeout=%dms)\n",
-		index, elus_afe.timeout_ms * 10);
-
 	ret = wait_event_timeout(elus_afe.ptr_wait[index],
 		(atomic_read(elus_afe.ptr_state) == 0),
-		msecs_to_jiffies(elus_afe.timeout_ms * 10));
-
+		msecs_to_jiffies(elus_afe.timeout_ms*10));
 	if (!ret) {
-		pr_err("[ELUS] wait_event_timeout() expired (port=%d param=0x%x)\n",
-		       port, param_id);
-		ret = -ETIMEDOUT;
-		goto fail_cmd;
-	}
-
-	if (atomic_read(elus_afe.ptr_status) != 0) {
-		pr_err("[ELUS] set param cmd failed: ptr_status=%d\n",
-		       atomic_read(elus_afe.ptr_status));
+		pr_err("%s: wait_event timeout\n", __func__);
 		ret = -EINVAL;
 		goto fail_cmd;
 	}
-
-	pr_info("[ELUS] param 0x%x applied successfully (port=%d)\n", param_id, port);
+	if (atomic_read(elus_afe.ptr_status) != 0) {
+		pr_err("%s: config cmd failed\n", __func__);
+		ret = -EINVAL;
+		goto fail_cmd;
+	}
 	ret = 0;
-
 fail_cmd:
-	pr_debug("[ELUS] %s param_id=0x%x ret=%d\n", __func__, param_id, ret);
-	kfree(set_param_v2);
-	kfree(set_param_v3);
-	kfree(packed_param_data);
+	pr_debug("%s config->pdata.param_id %x status %d\n",
+	__func__, config->pdata.param_id, ret);
 	return ret;
 }
-
 
 
 int32_t ultrasound_apr_set_parameter(int32_t port_id, uint32_t param_id,
@@ -364,7 +295,7 @@ static int32_t process_sensorhub_msg(uint32_t *payload, uint32_t payload_size)
 {
 	int32_t  ret = 0;
 
-	pr_err("[ELUS]: %s, paramId:%u, size:%d\n",
+	pr_err("[ELUS]: %s, paramId:%u, size:%d\n", 
 			__func__, payload[1], payload_size);
 
 	return ret;
@@ -415,7 +346,7 @@ int32_t elliptic_process_apr_payload(uint32_t *payload)
 				ELLIPTIC_ALL_DEVICES,
 				(const char *)&payload[3],
 				(size_t)payload_size,
-				ELLIPTIC_DATA_PUSH_FROM_KERNEL);
+                ELLIPTIC_DATA_PUSH_FROM_KERNEL);
 
 			if (ret != 0) {
 				pr_err("[ELUS] : failed to push apr payload to elliptic device");
@@ -425,7 +356,7 @@ int32_t elliptic_process_apr_payload(uint32_t *payload)
 			break;
 		default:
 			{
-				pr_err("[ELUS] : elliptic_process_apr_payload, Illegal paramId:%u", payload[1]);
+				pr_err("[ELUS] : elliptic_process_apr_payload, Illegal paramId:%u", payload[1]);	
 			}
 			break;
 		}
@@ -464,4 +395,6 @@ int elliptic_set_hall_state(int state)
 		sizeof(dse));
 	return ret;
 }
+
 EXPORT_SYMBOL(elliptic_set_hall_state);
+
