@@ -441,16 +441,12 @@ static int32_t cam_cci_calc_cmd_len(struct cci_device *cci_dev,
 	struct cam_cci_ctrl *c_ctrl, uint32_t cmd_size,
 	 struct cam_sensor_i2c_reg_array *i2c_cmd, uint32_t *pack)
 {
-#ifndef CONFIG_MACH_XIAOMI
 	uint8_t i;
-#endif
 	uint32_t len = 0;
 	uint8_t data_len = 0, addr_len = 0;
 	uint8_t pack_max_len;
 	struct cam_sensor_i2c_reg_setting *msg;
-#ifndef CONFIG_MACH_XIAOMI
 	struct cam_sensor_i2c_reg_array *cmd = i2c_cmd;
-#endif
 	uint32_t size = cmd_size;
 
 	if (!cci_dev || !c_ctrl) {
@@ -472,10 +468,11 @@ static int32_t cam_cci_calc_cmd_len(struct cci_device *cci_dev,
 		len = data_len + addr_len;
 		pack_max_len = size < (cci_dev->payload_size-len) ?
 			size : (cci_dev->payload_size-len);
-#ifndef CONFIG_MACH_XIAOMI
+
 		for (i = 0; i < pack_max_len;) {
 			if (cmd->delay || ((cmd - i2c_cmd) >= (cmd_size - 1)))
 				break;
+#ifndef CONFIG_MACH_XIAOMI
 			if (cmd->reg_addr + 1 ==
 				(cmd+1)->reg_addr) {
 				len += data_len;
@@ -484,13 +481,14 @@ static int32_t cam_cci_calc_cmd_len(struct cci_device *cci_dev,
 					break;
 				}
 				(*pack)++;
-			} else {
+			}
+#endif
+			else {
 				break;
 			}
 			i += data_len;
 			cmd++;
 		}
-#endif
 	}
 
 	if (len > cci_dev->payload_size) {
