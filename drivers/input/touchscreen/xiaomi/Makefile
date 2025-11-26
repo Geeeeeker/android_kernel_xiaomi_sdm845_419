@@ -6,4 +6,4 @@ obj-$(CONFIG_TOUCHSCREEN_ST_FTS_V521) += fts_521/
 obj-$(CONFIG_TOUCHSCREEN_NT36XXX_MI) += nt36xxx_mi/
 obj-$(CONFIG_TOUCHSCREEN_FT5X46)  += ft5x46/
 obj-$(CONFIG_TOUCHSCREEN_FTS_MI) += focaltech_touch_mi/
-
+obj-$(CONFIG_TOUCHSCREEN_FTS_CAF) += focaltech_touch_caf/
