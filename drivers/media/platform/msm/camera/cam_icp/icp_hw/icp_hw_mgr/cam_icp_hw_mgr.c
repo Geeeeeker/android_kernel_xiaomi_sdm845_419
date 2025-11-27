@@ -3671,6 +3671,11 @@ static void cam_icp_mgr_print_io_bufs(struct cam_packet *packet,
 				CAM_ERR(CAM_UTIL, "get src buf address fail");
 				continue;
 			}
+			if (iova_addr >> 32) {
+				CAM_ERR(CAM_ICP, "Invalid mapped address");
+				rc = -EINVAL;
+				continue;
+			}
 
 			CAM_INFO(CAM_ICP,
 				"pln %d w %d h %d size %d addr 0x%x offset 0x%x memh %x",
@@ -4457,8 +4462,8 @@ static int cam_icp_mgr_alloc_devs(struct device_node *of_node)
 		goto num_a5_failed;
 	}
 
-	icp_hw_mgr.devices[CAM_ICP_DEV_A5] = kzalloc(
-		sizeof(struct cam_hw_intf *) * num_dev, GFP_KERNEL);
+	icp_hw_mgr.devices[CAM_ICP_DEV_A5] = kcalloc(num_dev,
+		sizeof(struct cam_hw_intf *), GFP_KERNEL);
 	if (!icp_hw_mgr.devices[CAM_ICP_DEV_A5]) {
 		rc = -ENOMEM;
 		goto num_a5_failed;
