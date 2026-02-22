@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016-2019, 2021, The Linux Foundation. All rights reserved.
  */
-
+#include "msm-cdc-pinctrl.h"
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
