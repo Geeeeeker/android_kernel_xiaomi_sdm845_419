@@ -143,7 +143,7 @@ jobs:
             echo "警告：$FILE 不存在，跳过"
           fi
 
-      # ---------- 修复头文件依赖和宏定义（避免 here-doc）----------
+      # ---------- 修复头文件依赖和宏定义（强化版）----------
       - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
         working-directory: kernel
         run: |
@@ -159,24 +159,27 @@ jobs:
               echo "警告：$USBPD_H 不存在，跳过"
           fi
 
-          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（直接插入文件顶部）
           BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
           if [ -f "$BLUETOOTH_C" ]; then
               echo "正在修复 $BLUETOOTH_C"
               if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
-                  # 创建一个临时文件存放宏定义（避免 here-doc）
-                  TMPFILE=$(mktemp)
-                  printf '%s\n' \
-                      "#ifndef QCA_HSP_SOC_ID_0100" \
-                      "#define QCA_HSP_SOC_ID_0100 0x00000100" \
-                      "#define QCA_HSP_SOC_ID_0110 0x00000110" \
-                      "#define QCA_HSP_SOC_ID_0200 0x00000200" \
-                      "#define QCA_HSP_SOC_ID_0210 0x00000210" \
-                      "#define QCA_HSP_SOC_ID_1211 0x00001211" \
-                      "#endif" > "$TMPFILE"
-                  # 在第一个 #include 行后插入宏定义
-                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
-                  rm -f "$TMPFILE"
+                  echo "在文件顶部插入宏定义..."
+                  # 使用 sed 在文件顶部插入宏定义
+                  sed -i '1i\
+#ifndef QCA_HSP_SOC_ID_0100\
+#define QCA_HSP_SOC_ID_0100 0x00000100\
+#define QCA_HSP_SOC_ID_0110 0x00000110\
+#define QCA_HSP_SOC_ID_0200 0x00000200\
+#define QCA_HSP_SOC_ID_0210 0x00000210\
+#define QCA_HSP_SOC_ID_1211 0x00001211\
+#endif
+' "$BLUETOOTH_C"
+                  # 验证插入
+                  echo "插入后文件前10行："
+                  head -10 "$BLUETOOTH_C"
+              else
+                  echo "宏定义已存在，跳过。"
               fi
           else
               echo "警告：$BLUETOOTH_C 不存在，跳过"
