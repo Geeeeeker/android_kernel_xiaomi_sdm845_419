@@ -143,7 +143,7 @@ jobs:
             echo "警告：$FILE 不存在，跳过"
           fi
 
-      # ---------- 修复头文件依赖和宏定义（强化版）----------
+      # ---------- 修复头文件依赖和宏定义（使用安全的 here-doc）----------
       - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
         working-directory: kernel
         run: |
@@ -152,32 +152,33 @@ jobs:
           if [ -f "$USBPD_H" ]; then
               echo "正在修复 $USBPD_H"
               if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
-                  # 在文件头部插入 include（保留原文件头部的 #ifndef 保护）
                   sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
               fi
           else
               echo "警告：$USBPD_H 不存在，跳过"
           fi
 
-          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（直接插入文件顶部）
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（使用临时文件 + here-doc）
           BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
           if [ -f "$BLUETOOTH_C" ]; then
               echo "正在修复 $BLUETOOTH_C"
               if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
-                  echo "在文件顶部插入宏定义..."
-                  # 使用 sed 在文件顶部插入宏定义
-                  sed -i '1i\
-#ifndef QCA_HSP_SOC_ID_0100\
-#define QCA_HSP_SOC_ID_0100 0x00000100\
-#define QCA_HSP_SOC_ID_0110 0x00000110\
-#define QCA_HSP_SOC_ID_0200 0x00000200\
-#define QCA_HSP_SOC_ID_0210 0x00000210\
-#define QCA_HSP_SOC_ID_1211 0x00001211\
-#endif
-' "$BLUETOOTH_C"
-                  # 验证插入
-                  echo "插入后文件前10行："
-                  head -10 "$BLUETOOTH_C"
+                  echo "在第一个 #include 后插入宏定义..."
+                  TMPFILE=$(mktemp)
+                  # 使用 here-doc 写入临时文件，注意 EOF 必须与 cat 行左对齐（在 YAML 公共缩进后无前导空格）
+                  cat > "$TMPFILE" << 'EOF'
+          #ifndef QCA_HSP_SOC_ID_0100
+          #define QCA_HSP_SOC_ID_0100 0x00000100
+          #define QCA_HSP_SOC_ID_0110 0x00000110
+          #define QCA_HSP_SOC_ID_0200 0x00000200
+          #define QCA_HSP_SOC_ID_0210 0x00000210
+          #define QCA_HSP_SOC_ID_1211 0x00001211
+          #endif
+          EOF
+                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
+                  rm -f "$TMPFILE"
+                  echo "插入完成，显示文件前20行："
+                  head -20 "$BLUETOOTH_C"
               else
                   echo "宏定义已存在，跳过。"
               fi
