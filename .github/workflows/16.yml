@@ -143,7 +143,7 @@ jobs:
             echo "警告：$FILE 不存在，跳过"
           fi
 
-      # ---------- 修复头文件依赖和宏定义（直接修改文件）----------
+      # ---------- 修复头文件依赖和宏定义（避免 here-doc）----------
       - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
         working-directory: kernel
         run: |
@@ -164,15 +164,19 @@ jobs:
           if [ -f "$BLUETOOTH_C" ]; then
               echo "正在修复 $BLUETOOTH_C"
               if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
-                  # 在第一个 #include 之后插入宏定义
-                  sed -i '/#include/ a\
-#ifndef QCA_HSP_SOC_ID_0100\
-#define QCA_HSP_SOC_ID_0100 0x00000100\
-#define QCA_HSP_SOC_ID_0110 0x00000110\
-#define QCA_HSP_SOC_ID_0200 0x00000200\
-#define QCA_HSP_SOC_ID_0210 0x00000210\
-#define QCA_HSP_SOC_ID_1211 0x00001211\
-#endif' "$BLUETOOTH_C"
+                  # 创建一个临时文件存放宏定义（避免 here-doc）
+                  TMPFILE=$(mktemp)
+                  printf '%s\n' \
+                      "#ifndef QCA_HSP_SOC_ID_0100" \
+                      "#define QCA_HSP_SOC_ID_0100 0x00000100" \
+                      "#define QCA_HSP_SOC_ID_0110 0x00000110" \
+                      "#define QCA_HSP_SOC_ID_0200 0x00000200" \
+                      "#define QCA_HSP_SOC_ID_0210 0x00000210" \
+                      "#define QCA_HSP_SOC_ID_1211 0x00001211" \
+                      "#endif" > "$TMPFILE"
+                  # 在第一个 #include 行后插入宏定义
+                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
+                  rm -f "$TMPFILE"
               fi
           else
               echo "警告：$BLUETOOTH_C 不存在，跳过"
@@ -201,20 +205,19 @@ jobs:
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
           cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
           cd ak3
-          cat >anykernel.sh <<EOF
-          properties() { '
-          kernel.string=Kernel for ${{ matrix.device }}
-          device.name1=${{ matrix.device }}
-          do.devicecheck=1
-          '; }
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          is_slot_device=auto
-          block=auto
-          . tools/ak3-core.sh
-          split_boot
-          flash_boot
-          EOF
+          # 使用 echo 逐行写入 anykernel.sh，避免 here-doc 的 EOF 缩进问题
+          echo "properties() { '" > anykernel.sh
+          echo "kernel.string=Kernel for ${{ matrix.device }}" >> anykernel.sh
+          echo "device.name1=${{ matrix.device }}" >> anykernel.sh
+          echo "do.devicecheck=1" >> anykernel.sh
+          echo "' }" >> anykernel.sh
+          echo "ramdisk_compression=auto" >> anykernel.sh
+          echo "patch_vbmeta_flag=auto" >> anykernel.sh
+          echo "is_slot_device=auto" >> anykernel.sh
+          echo "block=auto" >> anykernel.sh
+          echo ". tools/ak3-core.sh" >> anykernel.sh
+          echo "split_boot" >> anykernel.sh
+          echo "flash_boot" >> anykernel.sh
           zip -qr9 Anykernel3-${{ matrix.device }}.zip * -x .git .github README.md *placeholder
 
       - name: 打包(boot)
