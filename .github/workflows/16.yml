@@ -129,7 +129,7 @@ jobs:
               patch -p0 < utils/xt_qtaguid.patch
           fi
 
-      # ---------- 新增修复步骤 ----------
+      # ---------- 修复触摸屏驱动中的函数原型 ----------
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
         run: |
@@ -141,6 +141,41 @@ jobs:
             echo "修复完成。"
           else
             echo "警告：$FILE 不存在，跳过"
+          fi
+
+      # ---------- 修复头文件依赖和宏定义（直接修改文件）----------
+      - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
+        working-directory: kernel
+        run: |
+          # 修复 usbpd.h：添加缺失的 #include <linux/err.h> 和 <linux/errno.h>
+          USBPD_H="include/linux/usb/usbpd.h"
+          if [ -f "$USBPD_H" ]; then
+              echo "正在修复 $USBPD_H"
+              if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
+                  # 在文件头部插入 include（保留原文件头部的 #ifndef 保护）
+                  sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
+              fi
+          else
+              echo "警告：$USBPD_H 不存在，跳过"
+          fi
+
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义
+          BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
+          if [ -f "$BLUETOOTH_C" ]; then
+              echo "正在修复 $BLUETOOTH_C"
+              if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
+                  # 在第一个 #include 之后插入宏定义
+                  sed -i '/#include/ a\
+#ifndef QCA_HSP_SOC_ID_0100\
+#define QCA_HSP_SOC_ID_0100 0x00000100\
+#define QCA_HSP_SOC_ID_0110 0x00000110\
+#define QCA_HSP_SOC_ID_0200 0x00000200\
+#define QCA_HSP_SOC_ID_0210 0x00000210\
+#define QCA_HSP_SOC_ID_1211 0x00001211\
+#endif' "$BLUETOOTH_C"
+              fi
+          else
+              echo "警告：$BLUETOOTH_C 不存在，跳过"
           fi
 
       - name: 编译
