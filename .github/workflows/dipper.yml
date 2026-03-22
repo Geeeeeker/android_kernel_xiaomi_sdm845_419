@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         device:
-          - polaris
+          - dipper
     steps:
       - name: 安装软件包
         env:
