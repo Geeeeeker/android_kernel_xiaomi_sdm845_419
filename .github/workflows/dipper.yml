@@ -1,0 +1,287 @@
+name: 编译内核
+
+on:
+  push:
+    branches:
+      - dev/*
+      - stable/*
+  workflow_dispatch:
+
+env:
+  AOSP_TOOLCHAIN_BRANCH: android16        # 分支名不包含 "-release"
+  AOSP_CLANG_VERSION: r547379
+
+jobs:
+  build:
+    name: 编译内核
+    permissions: { contents: write }
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        device:
+          - polaris
+    steps:
+      - name: 安装软件包
+        env:
+          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+        run: |
+          sudo apt update > /dev/null
+          sudo apt install -y ${{ env.PACKAGES }} > /dev/null
+
+      - name: 同步仓库
+        uses: actions/checkout@v4
+        with:
+          path: kernel
+
+      - name: 缓存Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
+
+      - name: 下载Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p clang &&
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.AOSP_TOOLCHAIN_BRANCH }}-release/clang-${{ env.AOSP_CLANG_VERSION }}.tar.gz" |
+          tar xz -C clang
+
+      - name: 缓存ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-${{ matrix.device }}
+          restore-keys: kernel-${{ matrix.device }}
+          max-size: 5G
+
+      - name: 配置内核基础参数 (Kprobes/OverlayFS/LTO等)
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          
+          # 开启 Kprobes
+          echo "CONFIG_MODULES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          
+          # 开启 OverlayFS
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          
+          # 禁用 LTO
+          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          
+          # 禁用 CC_WERROR
+          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
+
+          # 启用 BPF JIT 以解决 bpf_jit_blinding_enabled 未定义错误
+          echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
+          echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
+          # 确保 BPF 系统调用开启
+          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+
+      - name: 配置 LXC 和 Docker 支持
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+
+          # 移除 LXC 补丁中强制选中的越权语句
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          
+          # 在 defconfig 显式禁用会引发代码冲突的调度器特性
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+
+          # 禁用偏执网络
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          
+          # 显式禁用发生冲突的 Block 特性
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+
+          # 修复内核源码自带的 QVR 设备树语法错误 (sdm845)
+          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+
+          # 统一在此处应用 runc 补丁和 qtaguid 补丁
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
+          fi
+
+      # ---------- 修复触摸屏驱动中的函数原型 ----------
+      - name: 修复触摸屏驱动中的函数原型 (添加 void)
+        working-directory: kernel
+        run: |
+          FILE="drivers/input/touchscreen/xiaomi/xiaomi_touch.c"
+          if [ -f "$FILE" ]; then
+            echo "正在修复 $FILE 中的函数原型..."
+            sed -i 's/^struct class \*get_xiaomi_touch_class()/struct class *get_xiaomi_touch_class(void)/' "$FILE"
+            sed -i 's/^struct device \*get_xiaomi_touch_dev()/struct device *get_xiaomi_touch_dev(void)/' "$FILE"
+            echo "修复完成。"
+          else
+            echo "警告：$FILE 不存在，跳过"
+          fi
+
+      # ---------- 修复头文件依赖和宏定义（使用安全的 here-doc）----------
+      - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
+        working-directory: kernel
+        run: |
+          # 修复 usbpd.h：添加缺失的 #include <linux/err.h> 和 <linux/errno.h>
+          USBPD_H="include/linux/usb/usbpd.h"
+          if [ -f "$USBPD_H" ]; then
+              echo "正在修复 $USBPD_H"
+              if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
+                  sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
+              fi
+          else
+              echo "警告：$USBPD_H 不存在，跳过"
+          fi
+
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（使用临时文件 + here-doc）
+          BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
+          if [ -f "$BLUETOOTH_C" ]; then
+              echo "正在修复 $BLUETOOTH_C"
+              if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
+                  echo "在第一个 #include 后插入宏定义..."
+                  TMPFILE=$(mktemp)
+                  # 使用 here-doc 写入临时文件，注意 EOF 必须与 cat 行左对齐（在 YAML 公共缩进后无前导空格）
+                  cat > "$TMPFILE" << 'EOF'
+          #ifndef QCA_HSP_SOC_ID_0100
+          #define QCA_HSP_SOC_ID_0100 0x00000100
+          #define QCA_HSP_SOC_ID_0110 0x00000110
+          #define QCA_HSP_SOC_ID_0200 0x00000200
+          #define QCA_HSP_SOC_ID_0210 0x00000210
+          #define QCA_HSP_SOC_ID_1211 0x00001211
+          #endif
+          EOF
+                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
+                  rm -f "$TMPFILE"
+                  echo "插入完成，显示文件前20行："
+                  head -20 "$BLUETOOTH_C"
+              else
+                  echo "宏定义已存在，跳过。"
+              fi
+          else
+              echo "警告：$BLUETOOTH_C 不存在，跳过"
+          fi
+
+      - name: 编译
+        working-directory: kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export KBUILD_BUILD_USER=${{ github.repository_owner }}
+          export KBUILD_BUILD_HOST=github-runner
+          export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
+          make -j$(nproc --all) \
+            CC="ccache clang" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            O=out \
+            KCFLAGS="-Wno-error=strict-prototypes" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            dipper-mi845_defconfig all
+
+      - name: 打包(AnyKernel3)
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
+          cd ak3
+          # 使用 echo 逐行写入 anykernel.sh，避免 here-doc 的 EOF 缩进问题
+          echo "properties() { '" > anykernel.sh
+          echo "kernel.string=Kernel for ${{ matrix.device }}" >> anykernel.sh
+          echo "device.name1=${{ matrix.device }}" >> anykernel.sh
+          echo "do.devicecheck=1" >> anykernel.sh
+          echo "' }" >> anykernel.sh
+          echo "ramdisk_compression=auto" >> anykernel.sh
+          echo "patch_vbmeta_flag=auto" >> anykernel.sh
+          echo "is_slot_device=auto" >> anykernel.sh
+          echo "block=auto" >> anykernel.sh
+          echo ". tools/ak3-core.sh" >> anykernel.sh
+          echo "split_boot" >> anykernel.sh
+          echo "flash_boot" >> anykernel.sh
+          zip -qr9 Anykernel3-${{ matrix.device }}.zip * -x .git .github README.md *placeholder
+
+      - name: 打包(boot)
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1 mkbootimg
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
+          cd mkbootimg
+          boot_url=$(curl -LSs https://download.lineageos.org/api/v2/devices/${{ matrix.device }}/builds | jq -r '.[0].files[1].url')
+          curl -LSs $boot_url -o boot.img
+          mkbootimg_args=$(./unpack_bootimg.py --out out --boot_img boot.img --format mkbootimg)
+          mv Image.gz-dtb out/kernel
+          eval "./mkbootimg.py $mkbootimg_args -o boot-lineage-${{ matrix.device }}.img"
+
+      - name: 上传文件
+        uses: actions/upload-artifact@v5
+        with:
+          name: kernel-${{ matrix.device }}-ak3
+          path: ak3/Anykernel3-${{ matrix.device }}.zip
+
+      - name: 上传文件
+        uses: actions/upload-artifact@v5
+        with:
+          name: kernel-${{ matrix.device }}-boot
+          path: mkbootimg/boot-lineage-${{ matrix.device }}.img
+
+  release:
+    name: 发布
+    permissions: { contents: write }
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: 获取构建产物
+        uses: actions/download-artifact@v6
+        with:
+          path: kernel
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: 获取当前时间
+        id: time
+        run: |
+          echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: 下载ci管理器
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          repo: rsuntk/KernelSU
+          workflow_conclusion: success
+          name: manager
+          workflow: build-manager.yml
+          path: manager
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rel-${{ steps.time.outputs.timestamp }}
+          name: Kernel build ${{ steps.time.outputs.time }}
+          prerelease: ${{ startsWith(github.ref_name, 'dev/') }}
+          files: |
+            kernel/*
+            manager/*
