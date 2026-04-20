@@ -127,6 +127,11 @@ jobs:
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+
+          # 修复缺失的 techpack/mi845/Kconfig 引用
+          if [ -f techpack/Kconfig ]; then
+            sed -i 's|^source "techpack/mi845/Kconfig"|# source "techpack/mi845/Kconfig"|g' techpack/Kconfig
+          fi
           # 基础系统
           if [[ "${{ github.event.inputs.feature_base }}" == "true" ]]; then
             echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
