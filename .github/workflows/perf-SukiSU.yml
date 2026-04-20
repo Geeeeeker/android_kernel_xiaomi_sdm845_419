@@ -108,6 +108,18 @@ jobs:
             echo "警告：$TECHPACK_KCONFIG 不存在，跳过"
           fi
 
+      # ========== 禁用 Btrfs 支持 ==========
+      - name: 禁用 Btrfs 支持
+        working-directory: kernel
+        run: |
+          sed -i '/^source "fs\/btrfs\/Kconfig"/s/^/# /' fs/Kconfig
+
+      # ========== 修复 fair.c 缺失的 se_update_runnable 调用 ==========
+      - name: 修复 fair.c 缺失的 se_update_runnable 调用
+        working-directory: kernel
+        run: |
+          sed -i '/se_update_runnable(se);/s/^/\/\//' kernel/sched/fair.c
+
       # ========== 修复触摸屏驱动函数原型 ==========
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
@@ -163,7 +175,7 @@ jobs:
             echo "警告：$BLUETOOTH_C 不存在，跳过"
           fi
 
-      # ========== 缓存 Clang（参考第二份工作流） ==========
+      # ========== 缓存 Clang ==========
       - name: 缓存 Clang
         id: cache-clang
         uses: actions/cache@v4
@@ -195,7 +207,7 @@ jobs:
           echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
           rm -rf rtl8188eus-repo
 
-      # ========== 配置 LXC/Docker 官方支持（融合第二份的补丁与清理） ==========
+      # ========== 配置 LXC/Docker 官方支持 ==========
       - name: 配置 LXC/Docker 官方支持
         if: github.event.inputs.feature_lxc == 'true' || github.event.inputs.feature_docker == 'true'
         working-directory: kernel
@@ -203,7 +215,7 @@ jobs:
           rm -rf utils
           git clone --depth=1 https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
 
-          # 移除强制选中的依赖项（参考第二份）
+          # 移除强制选中的依赖项
           sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
           sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
           sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
@@ -212,7 +224,7 @@ jobs:
 
           echo 'source "utils/Kconfig"' >> Kconfig
 
-          # 应用 runc 补丁和 qtaguid 补丁（参考第二份）
+          # 应用 runc 补丁和 qtaguid 补丁
           chmod +x utils/runcpatch.sh
           if [ -f kernel/cgroup/cgroup.c ]; then
               sh utils/runcpatch.sh kernel/cgroup/cgroup.c
@@ -224,7 +236,7 @@ jobs:
               patch -p0 < utils/xt_qtaguid.patch || echo "xt_qtaguid patch 应用失败或已应用"
           fi
 
-          # 删除 QVR 相关设备树以修复语法错误（参考第二份）
+          # 删除 QVR 相关设备树以修复语法错误
           sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
           sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
@@ -248,10 +260,14 @@ jobs:
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
 
-          # 启用 BPF JIT（参考第二份，解决 bpf_jit_blinding_enabled 未定义）
+          # 启用 BPF JIT（解决 bpf_jit_blinding_enabled 未定义）
           echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
           echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
           echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+
+          # 彻底禁用 32 位 VDSO（修复 sigreturn.S 编译错误）
+          echo "CONFIG_COMPAT_VDSO=n" >> $DEFCONFIG
+          echo "CONFIG_VDSO32=n" >> $DEFCONFIG
 
           # 功能开关配置
           if [[ "${{ github.event.inputs.feature_usb_gadget }}" == "true" ]]; then
@@ -309,7 +325,7 @@ jobs:
 
           echo "CONFIG_DRM_LINDROID_EVDI=y" >> $DEFCONFIG
 
-          # 显式禁用与 LXC/Docker 冲突的特性（参考第二份）
+          # 显式禁用与 LXC/Docker 冲突的特性
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
@@ -344,6 +360,7 @@ jobs:
           ../scripts/config --file .config --set-val BLK_DEV_THROTTLING_LOW n
           ../scripts/config --file .config --set-val QTI_GVM n
           ../scripts/config --file .config --disable COMPAT_VDSO
+          ../scripts/config --file .config --disable VDSO32
           if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
             ../scripts/config --file .config --enable RTL8188EU
           else
@@ -369,9 +386,9 @@ jobs:
             KCFLAGS="-Wno-error=strict-prototypes" \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            all
+            Image.gz-dtb dtbs
 
-      # ========== 以下所有步骤（收集模块、USB/IP、打包、上传、发布）均保持原样 ==========
+      # ========== 以下步骤保持不变 ==========
       - name: 收集内核模块
         run: |
           mkdir -p modules-out
