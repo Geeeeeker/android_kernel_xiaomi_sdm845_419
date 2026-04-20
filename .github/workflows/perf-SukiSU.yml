@@ -96,7 +96,7 @@ jobs:
           ref: perf-SukiSU
           path: kernel
 
-      # ========== 修复 Kconfig 缺失问题 ==========
+       # ========== 修复 Kconfig 缺失问题 ==========
       - name: 修复 techpack Kconfig 缺失 mi845/Kconfig
         working-directory: kernel
         run: |
