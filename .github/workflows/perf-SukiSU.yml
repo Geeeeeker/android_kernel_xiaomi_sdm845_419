@@ -82,6 +82,17 @@ jobs:
     outputs:
       device: ${{ matrix.device }}
     steps:
+      # ---------- 新增：检出仓库 ----------
+      - name: 检出源代码
+        uses: actions/checkout@v4
+
+      # ---------- 新增：准备 kernel 子目录 ----------
+      - name: 准备内核源码目录
+        run: |
+          mkdir -p kernel
+          # 将当前目录下所有文件（包括隐藏文件）移入 kernel，排除 kernel 自身
+          find . -maxdepth 1 -not -name '.' -not -name '..' -not -name 'kernel' -exec mv {} kernel/ \;
+
       - name: 安装软件包
         env:
           PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi gcc-arm-linux-gnueabi p7zip-full
@@ -89,7 +100,7 @@ jobs:
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
- # ---------- 修复触摸屏驱动中的函数原型 ----------
+      # ---------- 修复触摸屏驱动中的函数原型 ----------
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
         run: |
@@ -339,6 +350,7 @@ jobs:
 
           make O=$PWD ARCH=arm64 olddefconfig 2>/dev/null || yes "" | make O=$PWD ARCH=arm64 oldconfig
           cd ..
+
       - name: 配置内核基础参数 (Kprobes/OverlayFS/LTO等)
         working-directory: kernel
         run: |
