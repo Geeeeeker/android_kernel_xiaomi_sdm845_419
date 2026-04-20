@@ -364,7 +364,12 @@ jobs:
           # 注释掉 vdso_prepare 中对 vdso32 的调用，即使 CONFIG_COMPAT_VDSO=n 也确保万无一失
           sed -i 's|^\(\s*\)$(if $(CONFIG_COMPAT_VDSO),$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso32 include/generated/vdso32-offsets.h)|\1# DISABLED: &|' arch/arm64/Makefile
           echo "已禁用 arch/arm64/Makefile 中的 vdso32 构建命令。"
-
+      - name: 注释掉 vdso32 构建入口
+        working-directory: kernel
+        run: |
+          sed -i 's/^obj-\$(CONFIG_COMPAT_VDSO)\s*+=/# &/' arch/arm64/kernel/Makefile
+          echo "已注释掉 arch/arm64/kernel/Makefile 中的 vdso32 构建条目。"
+          
       - name: 编译内核
         working-directory: kernel
         run: |
