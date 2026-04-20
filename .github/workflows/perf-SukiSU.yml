@@ -306,6 +306,7 @@ jobs:
           cd out
           ../scripts/config --file .config --set-val BLK_DEV_THROTTLING_LOW n
           ../scripts/config --file .config --set-val QTI_GVM n
+          ../scripts/config --file .config --disable COMPAT_VDSO   # 禁用32位VDSO，修复编译错误
           if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
             ../scripts/config --file .config --enable RTL8188EU
           else
