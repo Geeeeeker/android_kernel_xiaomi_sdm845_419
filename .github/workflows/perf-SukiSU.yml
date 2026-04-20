@@ -108,18 +108,6 @@ jobs:
             echo "警告：$TECHPACK_KCONFIG 不存在，跳过"
           fi
 
-      # ========== 禁用 Btrfs 支持 ==========
-      - name: 禁用 Btrfs 支持
-        working-directory: kernel
-        run: |
-          sed -i '/^source "fs\/btrfs\/Kconfig"/s/^/# /' fs/Kconfig
-
-      # ========== 修复 fair.c 缺失的 se_update_runnable 调用 ==========
-      - name: 修复 fair.c 缺失的 se_update_runnable 调用
-        working-directory: kernel
-        run: |
-          sed -i '/se_update_runnable(se);/s/^/\/\//' kernel/sched/fair.c
-
       # ========== 修复触摸屏驱动函数原型 ==========
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
@@ -149,21 +137,22 @@ jobs:
             echo "警告：$USBPD_H 不存在，跳过"
           fi
 
-          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（使用 printf 避免 here-doc 缩进问题）
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义
           BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
           if [ -f "$BLUETOOTH_C" ]; then
             echo "正在修复 $BLUETOOTH_C"
             if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
               echo "在第一个 #include 后插入宏定义..."
               TMPFILE=$(mktemp)
-              printf '%s\n' \
-                '#ifndef QCA_HSP_SOC_ID_0100' \
-                '#define QCA_HSP_SOC_ID_0100 0x00000100' \
-                '#define QCA_HSP_SOC_ID_0110 0x00000110' \
-                '#define QCA_HSP_SOC_ID_0200 0x00000200' \
-                '#define QCA_HSP_SOC_ID_0210 0x00000210' \
-                '#define QCA_HSP_SOC_ID_1211 0x00001211' \
-                '#endif' > "$TMPFILE"
+              cat > "$TMPFILE" << 'EOF'
+              #ifndef QCA_HSP_SOC_ID_0100
+              #define QCA_HSP_SOC_ID_0100 0x00000100
+              #define QCA_HSP_SOC_ID_0110 0x00000110
+              #define QCA_HSP_SOC_ID_0200 0x00000200
+              #define QCA_HSP_SOC_ID_0210 0x00000210
+              #define QCA_HSP_SOC_ID_1211 0x00001211
+              #endif
+              EOF
               sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
               rm -f "$TMPFILE"
               echo "插入完成，显示文件前20行："
@@ -174,6 +163,14 @@ jobs:
           else
             echo "警告：$BLUETOOTH_C 不存在，跳过"
           fi
+
+      # ========== 缓存 Clang（参考第二份工作流） ==========
+      - name: 缓存 Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
 
       - name: 下载 Clang (Android 16)
         if: steps.cache-clang.outputs.cache-hit != 'true'
@@ -199,12 +196,39 @@ jobs:
           echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
           rm -rf rtl8188eus-repo
 
+      # ========== 配置 LXC/Docker 官方支持（融合第二份的补丁与清理） ==========
       - name: 配置 LXC/Docker 官方支持
         if: github.event.inputs.feature_lxc == 'true' || github.event.inputs.feature_docker == 'true'
         working-directory: kernel
         run: |
+          rm -rf utils
           git clone --depth=1 https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+
+          # 移除强制选中的依赖项（参考第二份）
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+
           echo 'source "utils/Kconfig"' >> Kconfig
+
+          # 应用 runc 补丁和 qtaguid 补丁（参考第二份）
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch || echo "xt_qtaguid patch 应用失败或已应用"
+          fi
+
+          # 删除 QVR 相关设备树以修复语法错误（参考第二份）
+          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
 
       - name: 配置内核参数
         working-directory: kernel
@@ -218,10 +242,19 @@ jobs:
             echo "CONFIG_TMPFS=y" >> $DEFCONFIG
           fi
 
+          # 关闭 LTO，启用 LTO_NONE
           sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
 
+          # 启用 BPF JIT（参考第二份，解决 bpf_jit_blinding_enabled 未定义）
+          echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
+          echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
+          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+
+          # 功能开关配置
           if [[ "${{ github.event.inputs.feature_usb_gadget }}" == "true" ]]; then
             echo "CONFIG_USB_GADGET=y" >> $DEFCONFIG
             echo "CONFIG_USB_CONFIGFS=y" >> $DEFCONFIG
@@ -263,6 +296,8 @@ jobs:
           if [[ "${{ github.event.inputs.feature_ksu_symbols }}" == "true" ]]; then
             echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
             echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+            echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+            echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
           fi
 
           if [[ "${{ github.event.inputs.feature_kvm }}" == "true" ]]; then
@@ -275,12 +310,15 @@ jobs:
 
           echo "CONFIG_DRM_LINDROID_EVDI=y" >> $DEFCONFIG
 
+          # 显式禁用与 LXC/Docker 冲突的特性（参考第二份）
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+
           # ========== SukiSU 和 SUSFS 配置 ==========
           echo "CONFIG_SUKISU=y" >> $DEFCONFIG
           echo "CONFIG_SUKISU_KPROBES_HOOK=y" >> $DEFCONFIG
-
-          # 可选：开启 KPM 支持（SukiSU 特有功能）
-          # echo "CONFIG_SUKISU_KPM=y" >> $DEFCONFIG
 
           if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
             echo "CONFIG_SUKISU_SUSFS=y" >> $DEFCONFIG
@@ -306,7 +344,7 @@ jobs:
           cd out
           ../scripts/config --file .config --set-val BLK_DEV_THROTTLING_LOW n
           ../scripts/config --file .config --set-val QTI_GVM n
-          ../scripts/config --file .config --disable COMPAT_VDSO   # 禁用32位VDSO，修复编译错误
+          ../scripts/config --file .config --disable COMPAT_VDSO
           if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
             ../scripts/config --file .config --enable RTL8188EU
           else
@@ -334,6 +372,7 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             all
 
+      # ========== 以下所有步骤（收集模块、USB/IP、打包、上传、发布）均保持原样 ==========
       - name: 收集内核模块
         run: |
           mkdir -p modules-out
@@ -356,7 +395,6 @@ jobs:
           name: kernel-modules-${{ matrix.device }}
           path: ${{ env.MODULES_PACKAGE }}
 
-      # ========== 以下部分保持不变 ==========
       - name: 设置 QEMU 用户态支持 (USB/IP 工具编译)
         if: github.event.inputs.feature_usbip == 'true'
         run: |
@@ -451,7 +489,6 @@ jobs:
         with:
           name: usbip-arm64-bundle
           path: usbip-arm64-bundle.tar.gz
-      # ========== USB/IP 结束 ==========
 
       - name: 下载管理器 APK
         run: |
@@ -494,7 +531,6 @@ jobs:
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
           cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
           cd mkbootimg
-          # 请替换为 dipper 的官方 boot.img 链接
           BOOT_IMG_URL="https://github.com/Geeeeeker/boot/releases/download/extracted-roms-20260322-062443/LineageOS_boot_dipper.img"
           curl -LSs "$BOOT_IMG_URL" -o boot.img
           mkbootimg_args=$(./unpack_bootimg.py --out out --boot_img boot.img --format mkbootimg)
@@ -548,6 +584,7 @@ jobs:
           if [ -f kernel-modules-dipper.tar.gz ]; then
             mv kernel-modules-dipper.tar.gz "kernel-modules-${DEVICE}-${ANDROID_VER}.tar.gz"
           fi
+
       - name: 获取时间戳
         id: time
         run: echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
