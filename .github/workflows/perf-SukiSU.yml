@@ -1,86 +1,26 @@
-name: 编译内核 (内置 SukiSU + SUSFS + Docker)
+name: 编译内核
 
 on:
   push:
     branches:
       - dev/*
       - stable/*
-    tags:
-      - 'v*'
   workflow_dispatch:
-    inputs:
-      feature_base:
-        description: '基础系统配置'
-        type: boolean
-        default: true
-      feature_usb_gadget:
-        description: 'USB Gadget'
-        type: boolean
-        default: true
-      feature_usb_serial:
-        description: 'USB 转串口'
-        type: boolean
-        default: true
-      feature_usbip:
-        description: 'USB/IP'
-        type: boolean
-        default: true
-      feature_lxc:
-        description: 'LXC 容器'
-        type: boolean
-        default: true
-      feature_docker:
-        description: 'Docker 支持'
-        type: boolean
-        default: true
-      feature_uvc:
-        description: 'UVC 摄像头'
-        type: boolean
-        default: false
-      feature_zram:
-        description: 'ZRAM'
-        type: boolean
-        default: true
-      feature_android_container:
-        description: 'Android 容器'
-        type: boolean
-        default: true
-      feature_ksu_symbols:
-        description: 'KernelSU 符号'
-        type: boolean
-        default: true
-      feature_kvm:
-        description: 'KVM'
-        type: boolean
-        default: false
-      feature_rtl8188eu:
-        description: 'RTL8188EU 无线'
-        type: boolean
-        default: false
-      localversion:
-        description: '本地版本'
-        type: string
-        default: '-SukiSU-perf'
 
 env:
-  AOSP_TOOLCHAIN_BRANCH: android16-release
+  AOSP_TOOLCHAIN_BRANCH: android16        # 分支名不包含 "-release"
   AOSP_CLANG_VERSION: r547379
-  ANDROID_VERSION: "16"
-  SUSFS_ENABLE: "true"
-
-permissions:
-  contents: write
+  ANDROID_VERSION: "16"                   # 用于发布命名
 
 jobs:
   build:
     name: 编译内核
+    permissions: { contents: write }
     runs-on: ubuntu-latest
     strategy:
       matrix:
         device:
           - dipper
-    outputs:
-      device: ${{ matrix.device }}
     steps:
       - name: 安装软件包
         env:
@@ -89,26 +29,109 @@ jobs:
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
-      - name: 同步内核源码 (内置 SukiSU 和 SUSFS)
+      - name: 同步仓库
         uses: actions/checkout@v4
         with:
-          repository: duckyduckG/android_kernel_xiaomi_sdm845_419
-          ref: perf-SukiSU
           path: kernel
 
-      # ========== 修复 Kconfig 缺失问题 ==========
-      - name: 修复 techpack Kconfig 缺失 mi845/Kconfig
+      - name: 缓存Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
+
+      - name: 下载Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p clang &&
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.AOSP_TOOLCHAIN_BRANCH }}-release/clang-${{ env.AOSP_CLANG_VERSION }}.tar.gz" |
+          tar xz -C clang
+
+      - name: 缓存ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-${{ matrix.device }}
+          restore-keys: kernel-${{ matrix.device }}
+          max-size: 5G
+
+      # ---------- 以下为 dipper 原内核配置与修复（保持不变） ----------
+      - name: 配置内核基础参数 (Kprobes/OverlayFS/LTO等)
         working-directory: kernel
         run: |
-          TECHPACK_KCONFIG="techpack/Kconfig"
-          if [ -f "$TECHPACK_KCONFIG" ]; then
-            echo "正在注释掉 $TECHPACK_KCONFIG 中对 mi845/Kconfig 的引用..."
-            sed -i 's|^source "techpack/mi845/Kconfig"|# source "techpack/mi845/Kconfig"|' "$TECHPACK_KCONFIG"
-          else
-            echo "警告：$TECHPACK_KCONFIG 不存在，跳过"
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          
+          # 开启 Kprobes
+          echo "CONFIG_MODULES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          
+          # 开启 OverlayFS
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          
+          # 禁用 LTO
+          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          
+          # 禁用 CC_WERROR
+          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
+
+          # 启用 BPF JIT 以解决 bpf_jit_blinding_enabled 未定义错误
+          echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
+          echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
+          # 确保 BPF 系统调用开启
+          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+
+      - name: 配置 LXC 和 Docker 支持
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+
+          # 移除 LXC 补丁中强制选中的越权语句
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          
+          # 在 defconfig 显式禁用会引发代码冲突的调度器特性
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+
+          # 禁用偏执网络
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          
+          # 显式禁用发生冲突的 Block 特性
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+
+          # 修复内核源码自带的 QVR 设备树语法错误 (sdm845)
+          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+
+          # 统一在此处应用 runc 补丁和 qtaguid 补丁
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
           fi
 
-      # ========== 修复触摸屏驱动函数原型 ==========
+      # ---------- 修复触摸屏驱动中的函数原型 ----------
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
         run: |
@@ -122,255 +145,50 @@ jobs:
             echo "警告：$FILE 不存在，跳过"
           fi
 
-      # ========== 修复头文件依赖和宏定义 ==========
+      # ---------- 修复头文件依赖和宏定义（使用安全的 here-doc）----------
       - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
         working-directory: kernel
         run: |
           # 修复 usbpd.h：添加缺失的 #include <linux/err.h> 和 <linux/errno.h>
           USBPD_H="include/linux/usb/usbpd.h"
           if [ -f "$USBPD_H" ]; then
-            echo "正在修复 $USBPD_H"
-            if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
-              sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
-            fi
+              echo "正在修复 $USBPD_H"
+              if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
+                  sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
+              fi
           else
-            echo "警告：$USBPD_H 不存在，跳过"
+              echo "警告：$USBPD_H 不存在，跳过"
           fi
 
-          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（使用 printf 避免 here-doc 缩进问题）
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义
           BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
           if [ -f "$BLUETOOTH_C" ]; then
-            echo "正在修复 $BLUETOOTH_C"
-            if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
-              echo "在第一个 #include 后插入宏定义..."
-              TMPFILE=$(mktemp)
-              printf '%s\n' \
-                '#ifndef QCA_HSP_SOC_ID_0100' \
-                '#define QCA_HSP_SOC_ID_0100 0x00000100' \
-                '#define QCA_HSP_SOC_ID_0110 0x00000110' \
-                '#define QCA_HSP_SOC_ID_0200 0x00000200' \
-                '#define QCA_HSP_SOC_ID_0210 0x00000210' \
-                '#define QCA_HSP_SOC_ID_1211 0x00001211' \
-                '#endif' > "$TMPFILE"
-              sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
-              rm -f "$TMPFILE"
-              echo "插入完成，显示文件前20行："
-              head -20 "$BLUETOOTH_C"
-            else
-              echo "宏定义已存在，跳过。"
-            fi
+              echo "正在修复 $BLUETOOTH_C"
+              if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
+                  echo "在第一个 #include 后插入宏定义..."
+                  TMPFILE=$(mktemp)
+                  cat > "$TMPFILE" << 'EOF'
+          #ifndef QCA_HSP_SOC_ID_0100
+          #define QCA_HSP_SOC_ID_0100 0x00000100
+          #define QCA_HSP_SOC_ID_0110 0x00000110
+          #define QCA_HSP_SOC_ID_0200 0x00000200
+          #define QCA_HSP_SOC_ID_0210 0x00000210
+          #define QCA_HSP_SOC_ID_1211 0x00001211
+          #endif
+          EOF
+                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
+                  rm -f "$TMPFILE"
+                  echo "插入完成，显示文件前20行："
+                  head -20 "$BLUETOOTH_C"
+              else
+                  echo "宏定义已存在，跳过。"
+              fi
           else
-            echo "警告：$BLUETOOTH_C 不存在，跳过"
+              echo "警告：$BLUETOOTH_C 不存在，跳过"
           fi
 
-      # ========== 缓存 Clang ==========
-      - name: 缓存 Clang
-        id: cache-clang
-        uses: actions/cache@v4
-        with:
-          path: clang
-          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
-
-      - name: 下载 Clang (Android 16)
-        if: steps.cache-clang.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p clang &&
-          curl -LSs "https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz" |
-          tar xz -C clang
-
-      - name: 缓存 ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: kernel-${{ matrix.device }}
-          restore-keys: kernel-${{ matrix.device }}
-          max-size: 5G
-
-      - name: 集成 RTL8188EU 驱动
-        if: github.event.inputs.feature_rtl8188eu == 'true'
-        working-directory: kernel
-        run: |
-          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
-          cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
-          echo "obj-\$(CONFIG_RTL8188EU) += rtl8188eus/" >> drivers/Makefile
-          echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
-          rm -rf rtl8188eus-repo
-
-      # ========== 配置 LXC/Docker 官方支持 ==========
-      - name: 配置 LXC/Docker 官方支持
-        if: github.event.inputs.feature_lxc == 'true' || github.event.inputs.feature_docker == 'true'
-        working-directory: kernel
-        run: |
-          rm -rf utils
-          git clone --depth=1 https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-
-          # 移除强制选中的依赖项
-          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
-          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
-          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
-          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
-          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
-
-          echo 'source "utils/Kconfig"' >> Kconfig
-
-          # 应用 runc 补丁和 qtaguid 补丁
-          chmod +x utils/runcpatch.sh
-          if [ -f kernel/cgroup/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
-          fi
-          if [ -f kernel/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup.c
-          fi
-          if [ -f net/netfilter/xt_qtaguid.c ]; then
-              patch -p0 < utils/xt_qtaguid.patch || echo "xt_qtaguid patch 应用失败或已应用"
-          fi
-
-          # 删除 QVR 相关设备树以修复语法错误
-          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
-          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
-          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
-
-      - name: 配置内核参数
-        working-directory: kernel
-        run: |
-          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
-
-          # 基础系统
-          if [[ "${{ github.event.inputs.feature_base }}" == "true" ]]; then
-            echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
-            echo "CONFIG_EPOLL=y" >> $DEFCONFIG
-            echo "CONFIG_TMPFS=y" >> $DEFCONFIG
-          fi
-
-          # 关闭 LTO，启用 LTO_NONE
-          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
-          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
-          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
-          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
-          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-
-          # 启用 BPF JIT（解决 bpf_jit_blinding_enabled 未定义）
-          echo "CONFIG_BPF_JIT=y" >> $DEFCONFIG
-          echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
-          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
-
-          # 显式禁用 32 位 vDSO，从根源阻止 vdso32 编译
-          echo "CONFIG_COMPAT_VDSO=n" >> $DEFCONFIG
-
-          # 功能开关配置
-          if [[ "${{ github.event.inputs.feature_usb_gadget }}" == "true" ]]; then
-            echo "CONFIG_USB_GADGET=y" >> $DEFCONFIG
-            echo "CONFIG_USB_CONFIGFS=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_usb_serial }}" == "true" ]]; then
-            echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
-            echo "CONFIG_USB_SERIAL_CH341=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_usbip }}" == "true" ]]; then
-            echo "CONFIG_USBIP_CORE=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_lxc }}" == "true" ]]; then
-            echo "CONFIG_NAMESPACES=y" >> $DEFCONFIG
-            echo "CONFIG_CGROUPS=y" >> $DEFCONFIG
-            echo "CONFIG_USER_NS=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_docker }}" == "true" ]]; then
-            echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
-            echo "CONFIG_VLAN_8021Q=y" >> $DEFCONFIG
-            echo "CONFIG_BRIDGE=y" >> $DEFCONFIG
-            echo "CONFIG_DOCKER=y" >> $DEFCONFIG
-            sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
-            echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_zram }}" == "true" ]]; then
-            echo "CONFIG_ZRAM=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_android_container }}" == "true" ]]; then
-            echo "CONFIG_ASHMEM=y" >> $DEFCONFIG
-            echo "CONFIG_ANDROID_BINDER_IPC=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_ksu_symbols }}" == "true" ]]; then
-            echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
-            echo "CONFIG_KPROBES=y" >> $DEFCONFIG
-            echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
-            echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_kvm }}" == "true" ]]; then
-            echo "CONFIG_KVM=y" >> $DEFCONFIG
-          fi
-
-          if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
-            echo "CONFIG_RTL8188EU=y" >> $DEFCONFIG
-          fi
-
-          echo "CONFIG_DRM_LINDROID_EVDI=y" >> $DEFCONFIG
-
-          # 显式禁用与 LXC/Docker 冲突的特性
-          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
-          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
-          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
-          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-
-          # ========== SukiSU 和 SUSFS 配置 ==========
-          echo "CONFIG_SUKISU=y" >> $DEFCONFIG
-          echo "CONFIG_SUKISU_KPROBES_HOOK=y" >> $DEFCONFIG
-
-          if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
-            echo "CONFIG_SUKISU_SUSFS=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SUS_OVERLAYFS=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_ENABLE_LOG=y" >> $DEFCONFIG
-            echo "CONFIG_SUKISU_SUSFS_SUS_SU=y" >> $DEFCONFIG
-          fi
-
-          # 删除原有的 CONFIG_LOCALVERSION 配置，再添加新的
-          sed -i '/^CONFIG_LOCALVERSION/d' $DEFCONFIG
-          echo "CONFIG_LOCALVERSION=\"${{ github.event.inputs.localversion }}\"" >> $DEFCONFIG
-          echo "# CONFIG_MODVERSIONS is not set" >> $DEFCONFIG
-
-          # 生成 .config
-          make O=out ARCH=arm64 dipper-mi845_defconfig
-
-          # 进入 out 目录用 scripts/config 预设新选项，避免交互
-          cd out
-          ../scripts/config --file .config --set-val BLK_DEV_THROTTLING_LOW n
-          ../scripts/config --file .config --set-val QTI_GVM n
-          # 再次确认禁用 COMPAT_VDSO
-          ../scripts/config --file .config --disable COMPAT_VDSO
-          if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
-            ../scripts/config --file .config --enable RTL8188EU
-          else
-            ../scripts/config --file .config --disable RTL8188EU
-          fi
-
-          make O=$PWD ARCH=arm64 olddefconfig 2>/dev/null || yes "" | make O=$PWD ARCH=arm64 oldconfig
-          cd ..
-
-      # ========== 双重保险：清理 Makefile 中可能的 vdso32 残留引用 ==========
-      - name: 移除 Makefile 中对 vdso32 的依赖
-        working-directory: kernel
-        run: |
-          # 注释掉 vdso_prepare 中对 vdso32 的调用，即使 CONFIG_COMPAT_VDSO=n 也确保万无一失
-          sed -i 's|^\(\s*\)$(if $(CONFIG_COMPAT_VDSO),$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso32 include/generated/vdso32-offsets.h)|\1# DISABLED: &|' arch/arm64/Makefile
-          echo "已禁用 arch/arm64/Makefile 中的 vdso32 构建命令。"
-      - name: 注释掉 vdso32 构建入口
-        working-directory: kernel
-        run: |
-          sed -i 's/^obj-\$(CONFIG_COMPAT_VDSO)\s*+=/# &/' arch/arm64/kernel/Makefile
-          echo "已注释掉 arch/arm64/kernel/Makefile 中的 vdso32 构建条目。"
-          
-      - name: 编译内核
+      # ---------- 原 dipper 编译步骤（保持不变） ----------
+      - name: 编译
         working-directory: kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -386,9 +204,9 @@ jobs:
             KCFLAGS="-Wno-error=strict-prototypes" \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            Image.gz-dtb dtbs
+            dipper-mi845_defconfig all
 
-      # ========== 以下步骤保持不变 ==========
+      # ========== 以下为从 perf-SukiSU-2 提取的编译后步骤（保持原样） ==========
       - name: 收集内核模块
         run: |
           mkdir -p modules-out
@@ -412,14 +230,12 @@ jobs:
           path: ${{ env.MODULES_PACKAGE }}
 
       - name: 设置 QEMU 用户态支持 (USB/IP 工具编译)
-        if: github.event.inputs.feature_usbip == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
       - name: 编译 USB/IP 用户态工具 (Docker 容器)
-        if: github.event.inputs.feature_usbip == 'true'
         run: |
           mkdir -p usbip-out/{bin,libs}
           docker run --rm --platform linux/arm64 \
@@ -493,14 +309,12 @@ jobs:
             "
 
       - name: 打包 USB/IP 产物
-        if: github.event.inputs.feature_usbip == 'true'
         run: |
           cd usbip-out
           tar czf ../usbip-arm64-bundle.tar.gz .
           cd ..
 
       - name: 上传 USB/IP 捆绑包
-        if: github.event.inputs.feature_usbip == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: usbip-arm64-bundle
@@ -518,15 +332,16 @@ jobs:
           name: Manager-APKs
           path: apk-output/*.apk
 
-      - name: 打包 AnyKernel3
+      # ---------- 打包 AnyKernel3 (结合 dipper 原版与 perf 改进) ----------
+      - name: 打包(AnyKernel3)
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
           cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
           cp kernel/out/arch/arm64/boot/dtbo.img ak3/ || true
           cd ak3
           cat >anykernel.sh <<EOF
           properties() { '
-          kernel.string=SukiSU + SUSFS for ${{ matrix.device }}
+          kernel.string=Kernel for ${{ matrix.device }}
           device.name1=${{ matrix.device }}
           do.devicecheck=1
           '; }
@@ -542,13 +357,13 @@ jobs:
           7z a -tzip "../${ZIP_NAME}" * -x!.git -x!.github -x!README.md -x!*placeholder
           echo "AK3_ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
-      - name: 打包 boot.img
+      - name: 打包(boot)
         run: |
-          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1 mkbootimg
           cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
           cd mkbootimg
-          BOOT_IMG_URL="https://github.com/Geeeeeker/boot/releases/download/extracted-roms-20260322-062443/LineageOS_boot_dipper.img"
-          curl -LSs "$BOOT_IMG_URL" -o boot.img
+          boot_url=$(curl -LSs https://download.lineageos.org/api/v2/devices/${{ matrix.device }}/builds | jq -r '.[0].files[1].url')
+          curl -LSs $boot_url -o boot.img
           mkbootimg_args=$(./unpack_bootimg.py --out out --boot_img boot.img --format mkbootimg)
           mv Image.gz-dtb out/kernel
           eval "./mkbootimg.py $mkbootimg_args -o boot-lineage-${{ matrix.device }}.img"
@@ -566,11 +381,12 @@ jobs:
           name: kernel-${{ matrix.device }}-boot
           path: mkbootimg/${{ env.BOOT_IMG_NAME }}
 
+  # ========== 发布 Job (采用 perf 的完整逻辑) ==========
   release:
     name: 发布
+    permissions: { contents: write }
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     steps:
       - name: 下载所有构建产物
         uses: actions/download-artifact@v4
@@ -601,17 +417,30 @@ jobs:
             mv kernel-modules-dipper.tar.gz "kernel-modules-${DEVICE}-${ANDROID_VER}.tar.gz"
           fi
 
-      - name: 获取时间戳
+      - name: 获取当前时间
         id: time
-        run: echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+        run: |
+          echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: 发布到 Release
+      - name: 下载ci管理器（可选）
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          repo: rsuntk/KernelSU
+          workflow_conclusion: success
+          name: manager
+          workflow: build-manager.yml
+          path: manager
+
+      - name: 发布
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rel-${{ steps.time.outputs.time }}
-          name: "Kernel build ${{ steps.time.outputs.time }}"
-          draft: false
-          prerelease: true
-          files: artifacts/*
+          tag_name: rel-${{ steps.time.outputs.timestamp }}
+          name: Kernel build ${{ steps.time.outputs.time }}
+          prerelease: ${{ startsWith(github.ref_name, 'dev/') }}
+          files: |
+            artifacts/*
+            manager/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
