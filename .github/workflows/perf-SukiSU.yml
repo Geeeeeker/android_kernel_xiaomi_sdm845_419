@@ -108,6 +108,18 @@ jobs:
             echo "警告：$TECHPACK_KCONFIG 不存在，跳过"
           fi
 
+      # ========== 禁用 Btrfs 支持 ==========
+      - name: 禁用 Btrfs 支持
+        working-directory: kernel
+        run: |
+          sed -i '/^source "fs\/btrfs\/Kconfig"/s/^/# /' fs/Kconfig
+
+      # ========== 修复 fair.c 缺失的 se_update_runnable 调用 ==========
+      - name: 修复 fair.c 缺失的 se_update_runnable 调用
+        working-directory: kernel
+        run: |
+          sed -i '/se_update_runnable(se);/s/^/\/\//' kernel/sched/fair.c
+
       # ========== 修复触摸屏驱动函数原型 ==========
       - name: 修复触摸屏驱动中的函数原型 (添加 void)
         working-directory: kernel
@@ -253,6 +265,9 @@ jobs:
           echo "# CONFIG_BPF_JIT_ALWAYS_ON is not set" >> $DEFCONFIG
           echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
 
+          # 显式禁用 32 位 vDSO，从根源阻止 vdso32 编译
+          echo "CONFIG_COMPAT_VDSO=n" >> $DEFCONFIG
+
           # 功能开关配置
           if [[ "${{ github.event.inputs.feature_usb_gadget }}" == "true" ]]; then
             echo "CONFIG_USB_GADGET=y" >> $DEFCONFIG
@@ -343,6 +358,8 @@ jobs:
           cd out
           ../scripts/config --file .config --set-val BLK_DEV_THROTTLING_LOW n
           ../scripts/config --file .config --set-val QTI_GVM n
+          # 再次确认禁用 COMPAT_VDSO
+          ../scripts/config --file .config --disable COMPAT_VDSO
           if [[ "${{ github.event.inputs.feature_rtl8188eu }}" == "true" ]]; then
             ../scripts/config --file .config --enable RTL8188EU
           else
@@ -352,14 +369,13 @@ jobs:
           make O=$PWD ARCH=arm64 olddefconfig 2>/dev/null || yes "" | make O=$PWD ARCH=arm64 oldconfig
           cd ..
 
-      # ========== 绕过 vdso32 构建（Makefile 层面移除依赖） ==========
+      # ========== 双重保险：清理 Makefile 中可能的 vdso32 残留引用 ==========
       - name: 移除 Makefile 中对 vdso32 的依赖
         working-directory: kernel
         run: |
-          # 注释掉 vdso_prepare 目标中对 vdso32 的引用
-          # 防止编译时因缺少32位工具链或兼容性问题而失败
-          sed -i 's/^\(vdso_prepare:.*\)vdso32\(.*\)$/\1\2/' arch/arm64/Makefile
-          echo "已从 arch/arm64/Makefile 的 vdso_prepare 中移除 vdso32 依赖。"
+          # 注释掉 vdso_prepare 中对 vdso32 的调用，即使 CONFIG_COMPAT_VDSO=n 也确保万无一失
+          sed -i 's|^\(\s*\)$(if $(CONFIG_COMPAT_VDSO),$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso32 include/generated/vdso32-offsets.h)|\1# DISABLED: &|' arch/arm64/Makefile
+          echo "已禁用 arch/arm64/Makefile 中的 vdso32 构建命令。"
 
       - name: 编译内核
         working-directory: kernel
