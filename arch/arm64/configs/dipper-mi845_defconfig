@@ -1,3 +1,6 @@
+# CONFIG_NETPRIO_CGROUP is not set
+CONFIG_CGROUP_NET_PRIO=y
+# CONFIG_CGROUP_NET_PRIO is not set
 # ====== KernelSU Manual Hook 模式（无 KPROBES） ======
 # 核心依赖：禁用 KPROBES 系列，启用 Manual Hook
 # CONFIG_KPROBES is not set
