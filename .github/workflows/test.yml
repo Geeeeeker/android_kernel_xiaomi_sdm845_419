@@ -1,0 +1,402 @@
+name: 编译内核(KSU v0.9.5 + APatch/Magisk APK - SukiSU manual)
+
+on:
+  push:
+    branches:
+      - dev/*
+      - stable/*
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  AOSP_TOOLCHAIN_BRANCH: android11-release
+  AOSP_CLANG_VERSION: r383902b
+  KERNELSU_VERSION: v0.9.5
+  APATCH_VERSION: 11142
+  APATCH_TAG: 11142_166daa0_on_HEAD-release-signed
+  MAGISK_CANARY_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
+  ANDROID_VERSION: lineage-20.0
+
+jobs:
+  build:
+    name: 编译内核
+    permissions: { contents: write }
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        device:
+          - dipper
+    steps:
+      - name: 安装软件包
+        env:
+          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi gcc-arm-linux-gnueabi
+        run: |
+          sudo apt update > /dev/null
+          sudo apt install -y ${{ env.PACKAGES }} > /dev/null
+
+      - name: 同步仓库
+        uses: actions/checkout@v4
+        with:
+          repository: Geeeeeker/android_kernel_xiaomi_sdm845_419
+          ref: perf-SukiSU
+          path: kernel
+
+      # 配置内核基础参数（包含 Apache/APatch 所需完整符号支持）
+      - name: 配置内核基础参数 (OverlayFS/LTO/符号表/APatch支持)
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          # 开启 OverlayFS
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          # 禁用 LTO
+          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          # 禁用 CC_WERROR
+          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
+          # 用户要求的配置选项
+          echo "CONFIG_ASHMEM=y" >> $DEFCONFIG
+          echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
+          echo "CONFIG_SYSVIPC_SYSCTL=y" >> $DEFCONFIG
+          echo "CONFIG_SYSVIPC_COMPAT=y" >> $DEFCONFIG
+          echo "CONFIG_EPOLL=y" >> $DEFCONFIG
+          echo "CONFIG_EVENTFD=y" >> $DEFCONFIG
+          echo "CONFIG_SIGNALFD=y" >> $DEFCONFIG
+          echo "CONFIG_INOTIFY_USER=y" >> $DEFCONFIG
+          echo "CONFIG_SHMEM=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
+          echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
+          # USB/IP 配置（编译进内核）
+          echo "CONFIG_USBIP_CORE=y" >> $DEFCONFIG
+          echo "CONFIG_USBIP_VHCI_HCD=y" >> $DEFCONFIG
+          echo "CONFIG_USBIP_HOST=y" >> $DEFCONFIG
+          # Backlight 支持
+          echo "CONFIG_BACKLIGHT_CLASS_DEVICE=y" >> $DEFCONFIG
+          echo "CONFIG_BACKLIGHT_QCOM=y" >> $DEFCONFIG
+          # 开启 zstd 内存压缩（ZRAM 使用 zstd）
+          echo "CONFIG_ZRAM=y" >> $DEFCONFIG
+          echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> $DEFCONFIG
+          echo "CONFIG_CRYPTO_ZSTD=y" >> $DEFCONFIG
+          # ====== APatch / KernelSU 符号支持（完整） ======
+          echo "# APatch & KernelSU symbol support" >> $DEFCONFIG
+          echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
+          echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG          # APatch 依赖 kprobes
+          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          # ==============================================
+          # 启用 KernelSU 所需的核心选项
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          # 基础框架
+          echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_GENERIC=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CH341=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_FTDI_SIO=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_CP210X=y" >> $DEFCONFIG
+          echo "CONFIG_USB_SERIAL_PL2303=y" >> $DEFCONFIG
+          # 替换 MODVERSIONS（KernelSU 需要）
+          sed -i 's/CONFIG_MODVERSIONS=y/# CONFIG_MODVERSIONS is not set/' $DEFCONFIG
+          echo "# CONFIG_MODVERSIONS is not set" >> $DEFCONFIG
+
+      - name: 配置 LXC 和 Docker 支持
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/dipper-mi845_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+          sed -i '/sdm845-v2-qvr-evt.dtb/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/qvr/d' arch/arm64/boot/dts/qcom/Makefile
+          sed -i '/interposer/d' arch/arm64/boot/dts/qcom/Makefile
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
+          fi
+
+      - name: 集成 RTL8188EU 驱动 (编译进内核)
+        working-directory: kernel
+        run: |
+          # 克隆指定的驱动仓库
+          git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
+          
+          # 复制驱动源码到内核树
+          cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
+          
+          # 修改顶层 Makefile 与 Kconfig，使驱动参与编译
+          echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
+          echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
+          
+          # 清理临时目录
+          rm -rf rtl8188eus-repo
+          
+          # 进入驱动目录，修复 cfg80211_roamed API 不兼容问题（高版本内核需要）
+          cd drivers/rtl8188eus
+          if [ -f os_dep/linux/ioctl_cfg80211.c ]; then
+            sed -i '/^#else$/,/^#endif \/\*LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)\*\// {
+              /cfg80211_roamed(padapter->pnetdev/ {
+                :a
+                N
+                /);/!ba
+                s/.*cfg80211_roamed.*\n.*\n.*\n.*\n.*\n.*\n.*\n.*);/\
+          \t\tstruct cfg80211_roam_info roam_info = {\
+          \t\t\t.bssid = cur_network->network.MacAddress,\
+          \t\t\t.req_ie = pmlmepriv->assoc_req + sizeof(struct rtw_ieee80211_hdr_3addr) + 2,\
+          \t\t\t.req_ie_len = pmlmepriv->assoc_req_len - sizeof(struct rtw_ieee80211_hdr_3addr) - 2,\
+          \t\t\t.resp_ie = pmlmepriv->assoc_rsp + sizeof(struct rtw_ieee80211_hdr_3addr) + 6,\
+          \t\t\t.resp_ie_len = pmlmepriv->assoc_rsp_len - sizeof(struct rtw_ieee80211_hdr_3addr) - 6,\
+          \t\t};\
+          \t\tcfg80211_roamed(padapter->pnetdev, \&roam_info, GFP_ATOMIC);/
+              }
+            }' os_dep/linux/ioctl_cfg80211.c
+          fi
+
+      - name: 编译内核
+        working-directory: kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export KBUILD_BUILD_USER=${{ github.repository_owner }}
+          export KBUILD_BUILD_HOST=github-runner
+          export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          make -j$(nproc --all) \
+            CC="ccache clang" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            O=out \
+            KCFLAGS="-Wno-unknown-warning-option" \
+            dipper-mi845_defconfig all
+
+      - name: 收集 USB/IP 内核模块
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/usbip-out/modules
+          cp kernel/out/drivers/usb/usbip/*.ko $GITHUB_WORKSPACE/usbip-out/modules/ || true
+
+      - name: 设置 QEMU 用户态支持
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+      - name: 编译 USB/IP 用户态工具 (Docker 容器)
+        run: |
+          mkdir -p usbip-out/{bin,libs}
+          docker run --rm --platform linux/arm64 \
+            --memory=6g \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}/usbip-out:/output \
+            -w /workspace/kernel \
+            arm64v8/ubuntu:22.04 \
+            bash -c "
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              ulimit -s unlimited
+              apt update
+              apt install -y \
+                build-essential \
+                autoconf \
+                libtool \
+                pkg-config \
+                libudev-dev:arm64 \
+                libssl-dev:arm64 \
+                flex \
+                bison \
+                bc \
+                libelf-dev \
+                file \
+                patchelf
+              export ARCH=arm64
+              export CROSS_COMPILE=aarch64-linux-gnu-
+              export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+              cd tools/usb/usbip
+              ./autogen.sh
+              ./configure \
+                CFLAGS=\"-Wno-error -Wno-error=stringop-truncation \
+                         -I/workspace/kernel/out/include \
+                         -I/workspace/kernel/out/arch/arm64/include/generated \
+                         -I/workspace/kernel/arch/arm64/include\" \
+                --with-tcp-wrappers=no
+              make -j1
+              cp src/.libs/usbip /output/bin/
+              cp src/.libs/usbipd /output/bin/
+              cp libsrc/.libs/libusbip.so.0* /output/libs/
+              cd /output
+              BINARIES=\"bin/usbip bin/usbipd libs/libusbip.so.0*\"
+              DEPS=\"\"
+              for file in \$BINARIES; do
+                if [ -f \"\$file\" ]; then
+                  needed=\$(readelf -d \"\$file\" | grep NEEDED | awk '{print \$5}' | tr -d '[]' || true)
+                  for lib in \$needed; do
+                    if [[ \"\$DEPS\" != *\"\$lib\"* ]]; then
+                      DEPS=\"\$DEPS \$lib\"
+                    fi
+                  done
+                fi
+              done
+              for lib in \$(echo \$DEPS | tr ' ' '\\n' | sort -u); do
+                libpath=\$(ldconfig -p | grep \"\$lib (\" | head -1 | awk '{print \$NF}' || true)
+                if [ -z \"\$libpath\" ]; then
+                  libpath=\$(find /lib /usr/lib -name \"\$lib\" -type f 2>/dev/null | head -1 || true)
+                fi
+                if [ -n \"\$libpath\" ]; then
+                  cp -P \"\$libpath\" libs/ 2>/dev/null || cp \"\$libpath\" libs/
+                  for reallib in \$(find \"\$(dirname \"\$libpath\")\" -name \"\${lib%.so*}*\" -type f 2>/dev/null); do
+                    cp -n \"\$reallib\" libs/ 2>/dev/null || true
+                  done
+                fi
+              done
+              ld_linux=\"/lib/ld-linux-aarch64.so.1\"
+              if [ -f \"\$ld_linux\" ]; then
+                cp -P \"\$ld_linux\" libs/
+              fi
+            "
+
+      - name: 打包 USB/IP 产物
+        run: |
+          cd usbip-out
+          tar czf ../usbip-arm64-bundle.tar.gz .
+          cd ..
+
+      - name: 上传 USB/IP 捆绑包 (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbip-arm64-bundle
+          path: usbip-arm64-bundle.tar.gz
+
+      # ------------------------------------------------------------------
+      # 下载多版本管理器 APK：KernelSU / APatch / Magisk Canary
+      # ------------------------------------------------------------------
+      - name: 创建 APK 输出目录
+        run: mkdir -p apk-output
+
+      - name: 下载 KernelSU Manager APK (v0.9.5)
+        run: |
+          wget -O apk-output/KernelSU-Manager.apk \
+            https://github.com/tiann/KernelSU/releases/download/v0.9.5/KernelSU_v0.9.5_11872-release.apk
+
+      - name: 下载 APatch Manager APK
+        run: |
+          APATCH_URL="https://github.com/bmax121/APatch/releases/download/${{ env.APATCH_VERSION }}/APatch_${{ env.APATCH_TAG }}.apk"
+          wget -O apk-output/APatch-Manager.apk "$APATCH_URL"
+
+      - name: 下载 Magisk Canary APK
+        run: |
+          wget -O apk-output/Magisk-Canary.apk "${{ env.MAGISK_CANARY_URL }}"
+      # ------------------------------------------------------------------
+
+      - name: 打包 (AnyKernel3)
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
+          cp kernel/out/arch/arm64/boot/dtbo.img ak3/ || true
+          cd ak3
+          cat >anykernel.sh <<EOF
+          properties() { '
+          kernel.string=Kernel for ${{ matrix.device }} with KernelSU ${{ env.KERNELSU_VERSION }}
+          device.name1=${{ matrix.device }}
+          do.devicecheck=1
+          '; }
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          is_slot_device=auto
+          block=auto
+          . tools/ak3-core.sh
+          split_boot
+          flash_boot
+          EOF
+          DATE=$(date +%Y%m%d)
+          ZIP_NAME="anykernel3-${{ matrix.device }}-${{ env.ANDROID_VERSION }}-${DATE}.zip"
+          zip -qr9 "${ZIP_NAME}" * -x .git .github README.md *placeholder
+          mv "${ZIP_NAME}" ../
+
+      - name: 打包 (boot.img)
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1 mkbootimg
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
+          cd mkbootimg
+          boot_url=$(curl -LSs https://download.lineageos.org/api/v2/devices/${{ matrix.device }}/builds | jq -r '.[0].files[1].url')
+          curl -LSs $boot_url -o boot.img
+          mkbootimg_args=$(./unpack_bootimg.py --out out --boot_img boot.img --format mkbootimg)
+          mv Image.gz-dtb out/kernel
+          eval "./mkbootimg.py $mkbootimg_args -o boot-lineage-${{ matrix.device }}.img"
+
+      - name: 上传 AnyKernel3 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.device }}-ak3
+          path: anykernel3-*.zip
+
+      - name: 上传 boot 镜像
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.device }}-boot
+          path: mkbootimg/boot-lineage-${{ matrix.device }}.img
+
+      - name: 上传 APK 工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Manager-APKs
+          path: apk-output/*.apk
+
+  release:
+    name: 发布
+    permissions: { contents: write }
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: 获取构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: 获取 USB/IP 捆绑包
+        uses: actions/download-artifact@v4
+        with:
+          name: usbip-arm64-bundle
+          path: artifacts/usbip
+
+      - name: 获取 APK 合集
+        uses: actions/download-artifact@v4
+        with:
+          name: Manager-APKs
+          path: artifacts/manager
+
+      - name: 获取当前时间
+        id: time
+        run: |
+          echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rel-${{ steps.time.outputs.timestamp }}
+          name: Kernel build ${{ steps.time.outputs.time }}
+          prerelease: ${{ startsWith(github.ref_name, 'dev/') }}
+          files: artifacts/*
