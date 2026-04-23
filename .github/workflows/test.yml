@@ -255,14 +255,17 @@ jobs:
           export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          make -j$(nproc --all) \
+          # 先生成 .config
+          make O=out dipper-mi845_defconfig
+          # 强制禁用 CONFIG_CGROUP_NET_PRIO，防止编译 netprio_cgroup.h 报错
+          sed -i 's/^CONFIG_CGROUP_NET_PRIO=y/# CONFIG_CGROUP_NET_PRIO is not set/' out/.config
+          # 正常编译
+          make -j$(nproc --all) O=out \
             CC="ccache clang" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            O=out \
-            KCFLAGS="-Wno-unknown-warning-option" \
-            dipper-mi845_defconfig all
+            KCFLAGS="-Wno-unknown-warning-option"
 
       - name: 收集 USB/IP 内核模块
         run: |
