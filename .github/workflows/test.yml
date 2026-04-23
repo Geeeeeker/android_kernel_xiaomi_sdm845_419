@@ -1,4 +1,4 @@
-name: 编译内核(KSU v0.9.5 + APatch/Magisk APK - SukiSU manual)
+name: 编译内核(SukiSU-Ultra 13313 SUSFS 1.5.9 manual)
 
 on:
   push:
@@ -10,13 +10,13 @@ on:
   workflow_dispatch:
 
 env:
-  AOSP_TOOLCHAIN_BRANCH: android11-release
-  AOSP_CLANG_VERSION: r383902b
-  KERNELSU_VERSION: v0.9.5
+  AOSP_TOOLCHAIN_BRANCH: android16-release
+  AOSP_CLANG_VERSION: r547379
+  SUKISU_VERSION: 13313
   APATCH_VERSION: 11142
   APATCH_TAG: 11142_166daa0_on_HEAD-release-signed
   MAGISK_CANARY_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
-  ANDROID_VERSION: lineage-20.0
+  ANDROID_VERSION: lineage-23.0
 
 jobs:
   build:
@@ -41,8 +41,71 @@ jobs:
           repository: Geeeeeker/android_kernel_xiaomi_sdm845_419
           ref: perf-SukiSU
           path: kernel
+      # ---------- 修复触摸屏驱动中的函数原型 ----------
+      - name: 修复触摸屏驱动中的函数原型 (添加 void)
+        working-directory: kernel
+        run: |
+          FILE="drivers/input/touchscreen/xiaomi/xiaomi_touch.c"
+          if [ -f "$FILE" ]; then
+            echo "正在修复 $FILE 中的函数原型..."
+            sed -i 's/^struct class \*get_xiaomi_touch_class()/struct class *get_xiaomi_touch_class(void)/' "$FILE"
+            sed -i 's/^struct device \*get_xiaomi_touch_dev()/struct device *get_xiaomi_touch_dev(void)/' "$FILE"
+            echo "修复完成。"
+          else
+            echo "警告：$FILE 不存在，跳过"
+          fi
 
-      # 配置内核基础参数（包含 Apache/APatch 所需完整符号支持）
+      # ---------- 修复头文件依赖和宏定义（使用安全的 here-doc）----------
+      - name: 修复头文件依赖和宏定义 (USB PD / QCA蓝牙)
+        working-directory: kernel
+        run: |
+          # 修复 usbpd.h：添加缺失的 #include <linux/err.h> 和 <linux/errno.h>
+          USBPD_H="include/linux/usb/usbpd.h"
+          if [ -f "$USBPD_H" ]; then
+              echo "正在修复 $USBPD_H"
+              if ! grep -q '#include <linux/err.h>' "$USBPD_H"; then
+                  sed -i '1i#include <linux/err.h>\n#include <linux/errno.h>' "$USBPD_H"
+              fi
+          else
+              echo "警告：$USBPD_H 不存在，跳过"
+          fi
+
+          # 修复蓝牙驱动：添加缺失的 QCA SOC ID 宏定义（使用临时文件 + here-doc）
+          BLUETOOTH_C="drivers/bluetooth/bluetooth-power.c"
+          if [ -f "$BLUETOOTH_C" ]; then
+              echo "正在修复 $BLUETOOTH_C"
+              if ! grep -q 'QCA_HSP_SOC_ID_0100' "$BLUETOOTH_C"; then
+                  echo "在第一个 #include 后插入宏定义..."
+                  TMPFILE=$(mktemp)
+                  # 使用 here-doc 写入临时文件，注意 EOF 必须与 cat 行左对齐（在 YAML 公共缩进后无前导空格）
+                  cat > "$TMPFILE" << 'EOF'
+          #ifndef QCA_HSP_SOC_ID_0100
+          #define QCA_HSP_SOC_ID_0100 0x00000100
+          #define QCA_HSP_SOC_ID_0110 0x00000110
+          #define QCA_HSP_SOC_ID_0200 0x00000200
+          #define QCA_HSP_SOC_ID_0210 0x00000210
+          #define QCA_HSP_SOC_ID_1211 0x00001211
+          #endif
+          EOF
+                  sed -i '/#include/ r '"$TMPFILE" "$BLUETOOTH_C"
+                  rm -f "$TMPFILE"
+                  echo "插入完成，显示文件前20行："
+                  head -20 "$BLUETOOTH_C"
+              else
+                  echo "宏定义已存在，跳过。"
+              fi
+          else
+              echo "警告：$BLUETOOTH_C 不存在，跳过"
+          fi
+      # 修复 techpack/Kconfig 缺失问题
+      - name: 修复 techpack/mi845 Kconfig 缺失
+        working-directory: kernel
+        run: |
+          if [ -f techpack/Kconfig ]; then
+            # 注释掉或删除引用 mi845 的行，避免编译中断
+            sed -i 's/^source "techpack\/mi845\/Kconfig"/# source "techpack\/mi845\/Kconfig"/' techpack/Kconfig
+          fi
+
       - name: 配置内核基础参数 (OverlayFS/LTO/符号表/APatch支持)
         working-directory: kernel
         run: |
@@ -56,7 +119,7 @@ jobs:
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           # 禁用 CC_WERROR
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-          # 用户要求的配置选项
+          # 基础功能
           echo "CONFIG_ASHMEM=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC=y" >> $DEFCONFIG
           echo "CONFIG_SYSVIPC_SYSCTL=y" >> $DEFCONFIG
@@ -69,28 +132,27 @@ jobs:
           echo "CONFIG_TMPFS=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> $DEFCONFIG
           echo "CONFIG_TMPFS_XATTR=y" >> $DEFCONFIG
-          # USB/IP 配置（编译进内核）
+          # USB/IP
           echo "CONFIG_USBIP_CORE=y" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=y" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=y" >> $DEFCONFIG
-          # Backlight 支持
+          # Backlight
           echo "CONFIG_BACKLIGHT_CLASS_DEVICE=y" >> $DEFCONFIG
           echo "CONFIG_BACKLIGHT_QCOM=y" >> $DEFCONFIG
-          # 开启 zstd 内存压缩（ZRAM 使用 zstd）
+          # zstd 内存压缩
           echo "CONFIG_ZRAM=y" >> $DEFCONFIG
           echo "CONFIG_ZRAM_DEF_COMP_ZSTD=y" >> $DEFCONFIG
           echo "CONFIG_CRYPTO_ZSTD=y" >> $DEFCONFIG
-          # ====== APatch / KernelSU 符号支持（完整） ======
+          # APatch & KernelSU 符号支持
           echo "# APatch & KernelSU symbol support" >> $DEFCONFIG
           echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
           echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG          # APatch 依赖 kprobes
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
-          # ==============================================
-          # 启用 KernelSU 所需的核心选项
+          # 启用 KernelSU / SukiSU
           echo "CONFIG_KSU=y" >> $DEFCONFIG
-          # 基础框架
+          # USB 串口驱动
           echo "CONFIG_USB_SERIAL=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CONSOLE=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_GENERIC=y" >> $DEFCONFIG
@@ -98,7 +160,7 @@ jobs:
           echo "CONFIG_USB_SERIAL_FTDI_SIO=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_CP210X=y" >> $DEFCONFIG
           echo "CONFIG_USB_SERIAL_PL2303=y" >> $DEFCONFIG
-          # 替换 MODVERSIONS（KernelSU 需要）
+          # 关闭 MODVERSIONS（SukiSU 需要）
           sed -i 's/CONFIG_MODVERSIONS=y/# CONFIG_MODVERSIONS is not set/' $DEFCONFIG
           echo "# CONFIG_MODVERSIONS is not set" >> $DEFCONFIG
 
@@ -138,20 +200,11 @@ jobs:
       - name: 集成 RTL8188EU 驱动 (编译进内核)
         working-directory: kernel
         run: |
-          # 克隆指定的驱动仓库
           git clone --depth=1 --branch master https://github.com/Geeeeeker/android_kernel_xiaomi_sdm845.git rtl8188eus-repo
-          
-          # 复制驱动源码到内核树
           cp -r rtl8188eus-repo/drivers/rtl8188eus drivers/
-          
-          # 修改顶层 Makefile 与 Kconfig，使驱动参与编译
           echo 'obj-$(CONFIG_RTL8188EU) += rtl8188eus/' >> drivers/Makefile
           echo 'source "drivers/rtl8188eus/Kconfig"' >> drivers/Kconfig
-          
-          # 清理临时目录
           rm -rf rtl8188eus-repo
-          
-          # 进入驱动目录，修复 cfg80211_roamed API 不兼容问题（高版本内核需要）
           cd drivers/rtl8188eus
           if [ -f os_dep/linux/ioctl_cfg80211.c ]; then
             sed -i '/^#else$/,/^#endif \/\*LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)\*\// {
@@ -171,6 +224,27 @@ jobs:
               }
             }' os_dep/linux/ioctl_cfg80211.c
           fi
+
+      - name: 缓存 Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
+
+      - name: 下载 Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p clang &&
+          curl -LSs "https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz" |
+          tar xz -C clang
+
+      - name: 缓存 ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-${{ matrix.device }}
+          restore-keys: kernel-${{ matrix.device }}
+          max-size: 5G
 
       - name: 编译内核
         working-directory: kernel
@@ -286,9 +360,6 @@ jobs:
           name: usbip-arm64-bundle
           path: usbip-arm64-bundle.tar.gz
 
-      # ------------------------------------------------------------------
-      # 下载多版本管理器 APK：KernelSU / APatch / Magisk Canary
-      # ------------------------------------------------------------------
       - name: 创建 APK 输出目录
         run: mkdir -p apk-output
 
@@ -305,7 +376,6 @@ jobs:
       - name: 下载 Magisk Canary APK
         run: |
           wget -O apk-output/Magisk-Canary.apk "${{ env.MAGISK_CANARY_URL }}"
-      # ------------------------------------------------------------------
 
       - name: 打包 (AnyKernel3)
         run: |
@@ -315,7 +385,7 @@ jobs:
           cd ak3
           cat >anykernel.sh <<EOF
           properties() { '
-          kernel.string=Kernel for ${{ matrix.device }} with KernelSU ${{ env.KERNELSU_VERSION }}
+          kernel.string=Kernel for ${{ matrix.device }} with SukiSU-Ultra ${{ env.SUKISU_VERSION }}
           device.name1=${{ matrix.device }}
           do.devicecheck=1
           '; }
@@ -397,6 +467,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rel-${{ steps.time.outputs.timestamp }}
-          name: Kernel build ${{ steps.time.outputs.time }}
+          name: SukiSU-Ultra ${{ env.SUKISU_VERSION }} build ${{ steps.time.outputs.time }}
           prerelease: ${{ startsWith(github.ref_name, 'dev/') }}
           files: artifacts/*
